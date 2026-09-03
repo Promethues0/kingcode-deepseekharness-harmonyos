@@ -276,6 +276,20 @@ ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
 `autostart off` 原样删掉那段；`KC_NO_AUTOSTART=1` 临时跳过；`autostart status` 打印当前的块。
 **它仍然不是开机自启**——引擎的命还是绑在 HiShell 上。
 
+### 「彻底免掉终端」为什么做不到（三条路都在真机上试死了，2026-09-03）
+
+想让引擎脱离 HiShell、或者让 KingCode 应用自己把终端拉起来，只有这三条路，逐条的死因：
+
+| 路 | 死因 |
+|---|---|
+| 引擎跑在 **hdc 的 shell 域**（uid 2000，与 HiShell 生死无关） | SELinux 拒绝 `sh` 域执行 `data_local_tmp` 标签的**任何**文件。node 拷进 `/data/local/tmp` 并 `chmod 755` 后仍 `Permission denied`，连 toybox 拷过去都跑不了。`/data` 挂载没有 `noexec`，是策略拦的 |
+| 引擎跑在 **KingCode 应用沙箱**里 | normal_hap 域起不了 Node |
+| **应用 `startAbility` 拉起 HiShell** | 调用返回成功、窗管真建了 session（`startSceneTransition, to: EntryAbility/com.huawei.hmos.hishell/entry/0`），但 HiShell 在 200~240 ms 后自己干净退出（appspawn `exit with code:0`），死因是它自己的 `HiShellFsUtil: writeConfig failed … path is: unspecified/…`——它把自己的模块解析成了 unspecified。补 `moduleName: 'entry'` 一样死，所以不是调用方少传参数，是 HiShell 只认启动器/shell 域那种调用方。闭源，改不了。**反方向同样不通**：HiShell 的 PATH 里没有 `aa`/`bm`，`/system/bin` 对它是 Permission denied |
+
+所以能做的到此为止：`autostart` 让「开终端」等价于「起引擎」，壳则在引擎没起来时**守着**
+（每 3 秒敲一次门、最多 5 分钟），用户去开一次终端之后它自己连上，不用回来点任何按钮。
+**终端窗口切后台就行，但不能关。**
+
 ## 已知环境坑
 
 1. **CapsLock 会让自动化输入整体反转**。用 `uitest uiInput text` 驱动 HiShell 时，如果系统
