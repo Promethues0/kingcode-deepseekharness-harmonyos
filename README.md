@@ -13,7 +13,7 @@ HiShell 里，没有虚拟机、没有容器。
 | 形态 | 状态 | 证据 |
 |---|---|---|
 | **CLI（A 级）** | ✅ 全通 | 整棵组合树 boot 成功；无钥烟测恰好死在 `MISSING_CREDENTIAL`；`npm test` 全绿；带钥 `say hi` 退出码 0；一个真用工具的任务里 **bash 工具经 node-pty 在原生内核上跑 `uname -a`**（回 `HongMeng Kernel 1.13.0`）、**grep 工具经 ripgrep** 数出 README 26 行 |
-| **Web（B 级）** | 🟡 引擎与界面全通，差一条真回答 | 全局 dsh 原生 boot；`GET /` 401 → `?token=` 303 换 cookie → 200；`/api` 到网关；鸿蒙 ArkWeb 壳连 `127.0.0.1:3081` **加载出完整工作区**（品牌层、侧栏、KingCode 预设、设置→模型页显示「API 密钥已配置」）。**尚未**在 Web 里拿到一次真回答——复验当天设备出网的 TLS 层断了（见「已知环境坑」第 3 条），不是引擎问题 |
+| **Web（B 级）** | ✅ 全通 | 全局 dsh 原生 boot；`GET /` 401 → `?token=` 303 换 cookie → 200；`/api` 到网关；鸿蒙 ArkWeb 壳连 `127.0.0.1:3081` 加载出完整工作区（品牌层、侧栏、KingCode 预设、设置→模型页「API 密钥已配置」）；**在壳里发一条真消息拿到回答**——2 次工具调用，bash 经 node-pty 回 `HongMeng Kernel 1.13.0 … aarch64 Toybox`，grep 经 ripgrep 数出 26 行，20K token / 11 秒 / 89 tok/s / 缓存命中 46%（DeepSeek-V4-Pro High，完全权限） |
 | 上架应用市场（C 级） | ❌ 未做 | 应用沙箱（normal_hap 域）有 neverallow 限制，是另一条路 |
 
 ## 三步装完
@@ -154,22 +154,31 @@ ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态
 比连虚拟机 IP 少一整类问题：不用绑 `0.0.0.0`、没有 `/api` 信任名单与 IP 漂移、loopback 是安全
 上下文所以剪贴板可用、设置面不再降级成 memory 模式。
 
-首次在地址页填**带 `?token=` 的完整地址**（`kc-hmos url` 打印的那条）。实测能加载出完整工作区。
-壳目前还没接 401 判读（`onErrorReceive` 不认 HTTP 错误，要 `onHttpErrorReceive`），所以 token 过期
-或换端口时是白页，得手动改地址。
+首次在地址页填**带 `?token=` 的完整地址**（`kc-hmos url` 打印的那条）。实测能加载出完整工作区，
+并在壳里发消息拿到带工具调用的真回答。
+
+**引擎重启之后不用重贴地址**：cookie 的 signing secret 落盘在 `$DSH_HOME/.credentials.yaml`，
+壳里保存的旧地址照样能进，只是 WebSocket 断了——点一次左下角「连接异常，点击立即重连」即可。
+
+壳目前还没接 401 判读（`onErrorReceive` 只认网络错误，HTTP 错误要 `onHttpErrorReceive`），
+所以 cookie 真过期（30 天）或换了端口时是白页，得手动改地址。
 
 ---
 
 ## 已知环境坑
 
 1. **CapsLock 会让自动化输入整体反转**。用 `uitest uiInput text` 驱动 HiShell 时，如果系统
-   CapsLock 开着，`sh ~/x.sh` 会变成 `SH ~/X.SH`。查 `~/.zsh_history` 能看到实际落地的命令。
+   CapsLock 开着，`sh ~/x.sh` 会变成 `SH ~/X.SH`；查 `~/.zsh_history` 能看到实际落地的命令。
+   `uitest uiInput keyEvent 2074`（KEYCODE_CAPS_LOCK）不一定能改变它。两条绕法：反着打大写，
+   或者改用 **`uitest uiInput inputText <x> <y> '<文本>'`**——它按坐标直接写入，不走键盘，大小写如实。
+   另外 Ctrl+A 在 WebView 里会选中整页并弹出上下文菜单，把后续输入全吃掉。
 2. **官方 npm 源不稳**。参考项目直接说官方源不可用、必须 `--registry=https://registry.npmmirror.com`；
    我们 09-02 晚用官方源装成功，09-03 早上两个域名都 `http=000`。`kc-hmos` 留了 `KC_REGISTRY`。
 3. **出网 TLS 层会整体断**。09-03 上午实测：DNS 解析正常（19 ms）、TCP 连接成功（36 ms），但
    HTTPS 拿不到响应，`api.deepseek.com` 与 `registry.npmjs.org` 同时 `http=000`。表现在 Web UI 里
    就是 `本轮运行失败 DeepSeek API request to https://api.deepseek.com failed` / `TRANSPORT`，
-   重试 5 次全败。**这不是引擎的问题**，`kc-hmos status` 会单独把出网列成一项。
+   重试 5 次全败。**这不是引擎的问题**——同一天网络恢复后（`api.deepseek.com` 回 `http=401`、
+   `tls=0.055`）原样重试即通。`kc-hmos status` 会单独把出网列成一项，先看这里再怀疑引擎。
 4. **`/tmp` 是只读 erofs**，`TMPDIR` 要指别处（`env.sh` 指到家目录）。
 5. **`timeout` 是 toybox 版**，实测不一定能按时杀掉 node 子进程；脚本里别依赖它做硬超时。
 6. **hdc shell 与 HiShell 是两个环境**。hdc 进的是 `uid=2000 shell`、`u:r:sh:s0`，看不到
@@ -204,7 +213,6 @@ alpha 通道的会话认证、以及 el2 换 home 这条免补丁的路。
 
 ## 还没做的
 
-- Web 形态里的一次真回答（等设备出网恢复）。
 - 从零 `npm ci --ignore-scripts` 的完整顺序没复跑过——现在设备上这棵树是逐步摸出来的。
 - 关掉 HiShell 窗口后引擎是否存活、开机自启。
 - 壳里接 `onHttpErrorReceive` 判 401/403。
