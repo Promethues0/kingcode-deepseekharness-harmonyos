@@ -18,7 +18,7 @@ HiShell 里，没有虚拟机、没有容器。
 |---|---|---|
 | **CLI（A 级）** | ✅ 全通 | 整棵组合树 boot 成功；无钥烟测恰好死在 `MISSING_CREDENTIAL`；`npm test` 全绿；带钥 `say hi` 退出码 0；一个真用工具的任务里 **bash 工具经 node-pty 在原生内核上跑 `uname -a`**（回 `HongMeng Kernel 1.13.0`）、**grep 工具经 ripgrep** 数出 README 26 行 |
 | **Web（B 级）** | ✅ 全通 | 全局 dsh 原生 boot；`GET /` 401 → `?token=` 303 换 cookie → 200；`/api` 到网关；鸿蒙 ArkWeb 壳连 `127.0.0.1:3081` 加载出完整工作区（品牌层、侧栏、KingCode 预设、设置→模型页「API 密钥已配置」）；**在壳里发一条真消息拿到回答**——2 次工具调用，bash 经 node-pty 回 `HongMeng Kernel 1.13.0 … aarch64 Toybox`，grep 经 ripgrep 数出 26 行，20K token / 11 秒 / 89 tok/s / 缓存命中 46%（DeepSeek-V4-Pro High，完全权限） |
-| **从零即装即用** | ✅ 全通（2026-09-03） | 全新 clone 的两个仓库 + 全新 `DSH_HOME`，照本文的步骤在真机上走了一遍：`deps` → `install-cli` → `smoke`（PASS，恰好死在 `MISSING_CREDENTIAL`）→ `install-web` → `start` → **在鸿蒙自带浏览器里打开 `kc-hmos url` 那条地址**，token 被 303 换成 cookie、加载出带品牌与 KingCode 预设的完整工作区，发消息拿到带工具调用的真回答——bash 工具经 node-pty 跑出 `HarmonyOS localhost HongMeng Kernel 1.13.0 … aarch64 Toybox`，17.8K token / 3 秒 / 91 tok/s / 缓存命中 67% |
+| **从零即装即用** | ✅ 全通（2026-09-03） | 两轮。第二轮是**真冷装**：卸掉全局 dsh（519 包）、删掉 `DSH_HOME`、`npm cache clean --force`，然后全新 clone 的两个仓库 + 全新 `DSH_HOME`，**5 分 37 秒**跑完 `deps` → `install-cli` → `smoke`（PASS）→ `install-web` → `start`，doctor 全绿；浏览器里 token 换 cookie、加载出品牌工作区、选工作区、发消息——**唯一需要人手的只剩填自己的 API key**。第一轮（有 key）的记录：`deps` → `install-cli` → `smoke`（PASS，恰好死在 `MISSING_CREDENTIAL`）→ `install-web` → `start` → **在鸿蒙自带浏览器里打开 `kc-hmos url` 那条地址**，token 被 303 换成 cookie、加载出带品牌与 KingCode 预设的完整工作区，发消息拿到带工具调用的真回答——bash 工具经 node-pty 跑出 `HarmonyOS localhost HongMeng Kernel 1.13.0 … aarch64 Toybox`，17.8K token / 3 秒 / 91 tok/s / 缓存命中 67% |
 | 上架应用市场（C 级） | ❌ 未做 | 应用沙箱（normal_hap 域）有 neverallow 限制，是另一条路 |
 
 > **2026-09-03 的一轮审计（六维度 + 对抗性核实）在这套东西里挖出并修掉了若干真缺陷**，
@@ -85,8 +85,12 @@ profile 而不是拷贝，preset 里 `kingcode/plugins/env-context.js` 的
    那个 `chmod 600` 是硬的：`dsh-credentials-local` 见到组/其他位不为 0 就
    `throw ... is readable beyond its owner`。这也正是 `DSH_HOME` 必须放 el2 的原因（见第 2 节）。
 
+> **别把 `.credentials.yaml` 存在当成「key 已配」**：引擎首次启动自己就会建这个文件，
+> 用来存 cookie 的签名密钥（`records: client-connection/browser-session`），里面没有任何
+> API key。`kc-hmos doctor` 查的是文件里有没有 `DEEPSEEK_API_KEY` 这个 ref，不是文件在不在。
+
 `kc-hmos doctor` 一次性打印工具链、平台事实（platform / V8 lite / chmod 落位 / 硬链接）、
-**三处 dsh 版本是否分叉**、**profile / preset / sharp 三件必需品**、**凭证在不在与它的 mode**、
+**三处 dsh 版本是否分叉**、**profile / preset / sharp 三件必需品**、**API key 到底配没配**、
 以及补丁是否在位。`kc-hmos start` 超时时先看它。
 
 ## 依赖清单

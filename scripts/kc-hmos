@@ -257,11 +257,20 @@ cmd_doctor() {
     && printf '  %-22s %s\n' 'sharp WASM 后端' '在' \
     || printf '  %-22s %s\n' 'sharp WASM 后端' '缺 —— dsh-attachment-local 加载期就 require sharp，引擎起不来'
   echo '── 凭证 ──'
+  # **只查文件在不在会骗人**：引擎首次启动自己就会建这个文件，用来存 cookie 的签名密钥
+  # （records: client-connection/browser-session），里面并没有任何 API key。2026-09-03
+  # 冷装时就是这样被误导的——doctor 报「凭证在」，一发消息却是 MISSING_CREDENTIAL。
+  # 所以要看里面有没有 DEEPSEEK_API_KEY 这个 ref。
   if [ -f "$DSH_HOME/.credentials.yaml" ]; then
     m="$(stat -c '%a' "$DSH_HOME/.credentials.yaml" 2>/dev/null || echo '?')"
-    printf '  %-22s %s\n' '.credentials.yaml' "在（mode $m；不是 600 的话 dsh 会拒绝启动）"
+    if grep -q 'DEEPSEEK_API_KEY' "$DSH_HOME/.credentials.yaml" 2>/dev/null; then
+      printf '  %-22s %s\n' 'API key' "已落盘（mode $m；不是 600 的话 dsh 会拒绝启动）"
+    else
+      printf '  %-22s %s\n' 'API key' "**没有** —— 文件在（mode $m）但只存了 cookie 签名密钥，那是引擎自己建的。"
+      printf '  %-22s %s\n' '' '三条路：DEEPSEEK_API_KEY=sk-... kc-hmos start ／ 起来后在设置→模型页填 ／ 自己写 refs（见 README）'
+    fi
   else
-    printf '  %-22s %s\n' '.credentials.yaml' '没有 —— 用 DEEPSEEK_API_KEY=sk-... kc-hmos start，或起来后在设置→模型页填'
+    printf '  %-22s %s\n' 'API key' '没有 —— 用 DEEPSEEK_API_KEY=sk-... kc-hmos start，或起来后在设置→模型页填'
   fi
   echo '── 补丁是否在位 ──'
   for root in "$REPO/node_modules" "$GLOBAL_DSH/node_modules"; do
