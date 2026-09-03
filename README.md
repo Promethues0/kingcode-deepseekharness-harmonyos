@@ -165,6 +165,21 @@ ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态
 
 ---
 
+## 引擎的生命周期绑死在 HiShell 上（2026-09-03 实测）
+
+三档对照，`nohup` 与 `setsid` 都试过：
+
+| 操作 | 引擎 | 端口 3081 |
+|---|---|---|
+| HiShell 切到后台（比如切去用鸿蒙壳） | **活着** | 仍 LISTEN |
+| 关掉 HiShell 窗口（点标题栏的 ✕） | **立刻死** | 连 TIME_WAIT 都不留 |
+| `aa force-stop com.huawei.hmos.hishell` | **立刻死** | TIME_WAIT 后消失 |
+
+即使用 `setsid` 让引擎自成会话、父进程被 init 收养（实测 `ppid=1`、`sid` 等于自身 pid），
+也挡不住——鸿蒙在应用终止时收走整个应用沙箱的进程组，跟 POSIX 那套「脱离控制终端就活得下去」
+不是一回事。所以 **正常使用形态是「HiShell 窗口留着、切后台」**，不是「起完就关」；
+而参考项目里那套四层开机自启钩子解决的是「怎么自动跑起来」，解决不了「窗口关了怎么办」。
+
 ## 已知环境坑
 
 1. **CapsLock 会让自动化输入整体反转**。用 `uitest uiInput text` 驱动 HiShell 时，如果系统
@@ -214,7 +229,8 @@ alpha 通道的会话认证、以及 el2 换 home 这条免补丁的路。
 ## 还没做的
 
 - 从零 `npm ci --ignore-scripts` 的完整顺序没复跑过——现在设备上这棵树是逐步摸出来的。
-- 关掉 HiShell 窗口后引擎是否存活、开机自启。
+- ~~关掉 HiShell 窗口后引擎是否存活~~ —— **已验，答案是不存活**（见「引擎的生命周期」一节）。
+- 开机自启：能做的只有「开机自动打开 HiShell 并拉起引擎」，窗口仍必须留着。
 - 壳里接 `onHttpErrorReceive` 判 401/403。
 - 向上游提三件事（只开 Discussions）：把 `openharmony` 当 POSIX 认、`link()` EPERM 回落 rename、
   koffi 改惰性加载——合入后 ①②③④ 都不再需要。
