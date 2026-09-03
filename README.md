@@ -89,7 +89,17 @@ profile 而不是拷贝，preset 里 `kingcode/plugins/env-context.js` 的
 > 用来存 cookie 的签名密钥（`records: client-connection/browser-session`），里面没有任何
 > API key。`kc-hmos doctor` 查的是文件里有没有 `DEEPSEEK_API_KEY` 这个 ref，不是文件在不在。
 
-`kc-hmos autostart on` 之后，日常使用就是「开 HiShell → 点图标」两个动作（见「引擎的生命周期」一节）。
+**装完先跑一次 `kc-hmos autostart on`**——之后日常就只剩两个动作：**开终端 → 点 KingCode 图标**。
+打开终端时它会自己把引擎带起来，并在终端里如实报一句：
+
+```
+● KingCode 引擎正在后台启动…（约 20-40 秒，首次更久）
+  现在就可以去开 KingCode 应用，它会自己等到引擎就绪。
+  这个窗口最小化就行，但别关 —— 关掉引擎会跟着停。
+```
+
+引擎已经在跑时它只报一行「已在跑，直接开 KingCode 应用就行」，不做任何多余的事。
+壳那边也不需要你等：引擎没就绪时它守着、每 3 秒敲一次门，起来了自己就进去了。
 
 `kc-hmos doctor` 一次性打印工具链、平台事实（platform / V8 lite / chmod 落位 / 硬链接）、
 **三处 dsh 版本是否分叉**、**profile / preset / sharp 三件必需品**、**API key 到底配没配**、

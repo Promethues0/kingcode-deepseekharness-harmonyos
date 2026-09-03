@@ -25,6 +25,8 @@
 # - **DSH_HOME 必须落在 /data/storage/el2/base**：家目录是 hmdfs，chmod 600 落成 660，
 #   dsh-credentials-local 会拒绝启动。
 set -u
+QUIET=0
+[ "${1:-}" = "--quiet" ] && { QUIET=1; shift; }
 # **必须解符号链接**：README 教的装法是 `ln -sf .../scripts/kc-hmos ~/.harmonybrew/bin/kc-hmos`，
 # 而 $0 是那个软链自身。不解的话 HERE 落在 ~/.harmonybrew/bin，那儿没有 env.sh /
 # patch-node-modules.sh / smoke.sh —— POSIX sh 里 `.` 找不到文件会让脚本当场终止，
@@ -43,7 +45,7 @@ REG=""
 [ -n "${KC_REGISTRY:-}" ] && REG="--registry=$KC_REGISTRY"
 mkdir -p "$STATE"
 
-info() { printf '  %s\n' "$*"; }
+info() { [ "$QUIET" = "1" ] || printf '  %s\n' "$*"; }
 die()  { printf 'kc-hmos: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -145,7 +147,11 @@ cmd_install_web() {
   sh "$HERE/patch-node-modules.sh" --global || die "打补丁失败"
   info "装 profile 与 preset（品牌层、KingCode 预设）"
   ( cd "$REPO" && bash profile/setup.sh ) || die "profile/setup.sh 失败"
-  info "完成。起服务： kc-hmos start"
+  info "完成。"
+  info ""
+  info "接下来两条，做完日常就只剩「开终端 + 点 KingCode 图标」："
+  info "  1) kc-hmos autostart on   —— 以后打开终端自动起引擎"
+  info "  2) kc-hmos start          —— 现在先起一个"
   info "第一次要带上 key： DEEPSEEK_API_KEY=sk-... kc-hmos start   （或起来之后在设置→模型页填，见 README）"
 }
 
@@ -175,9 +181,13 @@ cmd_start() {
   while [ $i -lt 45 ]; do
     sleep 2
     grep -q 'dsh web: http' "$LOG" 2>/dev/null && {
-      info "就绪"
+      info "就绪 → http://127.0.0.1:$PORT"
+      info ""
+      info "直接开 KingCode 应用就行（会话 cookie 有 30 天，引擎重启也不用重贴）。"
+      info "只有第一次用、或清过应用数据时，才需要下面这条带 token 的地址："
       cmd_url
-      info "注意：引擎的命寿绑在这个 HiShell 窗口上——切后台没事，关掉窗口引擎立刻死（setsid 也挡不住）。"
+      info ""
+      info "这个终端窗口最小化就行，但别关——关掉引擎会跟着停（setsid 也挡不住）。"
       return 0
     }
     i=$((i+1))
@@ -222,25 +232,40 @@ autostart_strip() {   # 把已有的块从 $ZSHRC 里删掉（有就删，没有
   ' "$ZSHRC" > "$ZSHRC.kc-tmp" && mv "$ZSHRC.kc-tmp" "$ZSHRC"
 }
 
+# 静默判断引擎在不在跑（退出码即答案）。autostart 块用它决定打哪句提示。
+cmd_engine_running() {
+  load_env
+  [ -n "$(engine_pid)" ]
+}
+
 cmd_autostart() {
   load_env
   case "${1:-status}" in
     on)
       autostart_strip
-      # $SELF 已经解过符号链接，指向仓库里的真身
-      {
-        echo ""
-        echo "$AS_BEGIN"
-        echo "# 打开 HiShell 就把 KingCode 引擎带起来。引擎已经在跑就什么都不做。"
-        echo "# **这不是开机自启**：引擎的命绑在 HiShell 上，窗口关掉就死。"
-        echo "# 临时跳过：KC_NO_AUTOSTART=1；彻底移除：kc-hmos autostart off"
-        echo "if [ -z \"\${KC_NO_AUTOSTART:-}\" ] && [ -z \"\${KC_AUTOSTART_DONE:-}\" ]; then"
-        echo "  export KC_AUTOSTART_DONE=1"
-        echo "  ( KINGCODE_REPO=\"$REPO\" DSH_HOME=\"$DSH_HOME\" KC_PORT=\"$PORT\" \\"
-        echo "    \"$SELF\" start --no-wait >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1"
-        echo "fi"
-        echo "$AS_END"
-      } >> "$ZSHRC"
+      # $SELF 已经解过符号链接，指向仓库里的真身。
+      # 用不带引号的 heredoc：$REPO/$DSH_HOME/$PORT/$SELF 就地展开固化进块里，
+      # 需要留到运行时的 $ 一律写成 \$。不用颜色码——写进 .zshrc 里的转义太脆。
+      cat >> "$ZSHRC" <<BLOCK
+
+$AS_BEGIN
+# 打开终端就把 KingCode 引擎带起来。已经在跑就什么都不做。
+# **这不是开机自启**：引擎的命绑在终端上，窗口关掉就死。
+# 临时跳过：KC_NO_AUTOSTART=1；彻底移除：kc-hmos autostart off
+if [ -z "\${KC_NO_AUTOSTART:-}" ] && [ -z "\${KC_AUTOSTART_DONE:-}" ]; then
+  export KC_AUTOSTART_DONE=1
+  if "$SELF" --quiet engine-running; then
+    echo "● KingCode 引擎已在跑（127.0.0.1:$PORT）。直接开 KingCode 应用就行。"
+  else
+    ( KINGCODE_REPO="$REPO" DSH_HOME="$DSH_HOME" KC_PORT="$PORT" \\
+      "$SELF" start --no-wait >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1
+    echo "● KingCode 引擎正在后台启动…（约 20-40 秒，首次更久）"
+    echo "  现在就可以去开 KingCode 应用，它会自己等到引擎就绪。"
+    echo "  这个窗口最小化就行，但别关 —— 关掉引擎会跟着停。"
+  fi
+fi
+$AS_END
+BLOCK
       info "已写进 $ZSHRC：下次打开 HiShell 会自动起引擎（端口 $PORT，DSH_HOME=$DSH_HOME）"
       info "本次窗口不受影响；现在就要的话跑 kc-hmos start。"
       ;;
@@ -314,6 +339,12 @@ cmd_doctor() {
   [ -d "$GLOBAL_DSH/node_modules/@img/sharp-wasm32" ] \
     && printf '  %-22s %s\n' 'sharp WASM 后端' '在' \
     || printf '  %-22s %s\n' 'sharp WASM 后端' '缺 —— dsh-attachment-local 加载期就 require sharp，引擎起不来'
+  echo '── 开终端即自启 ──'
+  if [ -f "$ZSHRC" ] && grep -qF "$AS_BEGIN" "$ZSHRC" 2>/dev/null; then
+    printf '  %-22s %s\n' 'autostart' '已开启（打开终端就会把引擎带起来）'
+  else
+    printf '  %-22s %s\n' 'autostart' '未开启 —— kc-hmos autostart on（日常就只剩「开终端 + 点图标」）'
+  fi
   echo '── 凭证 ──'
   # **只查文件在不在会骗人**：引擎首次启动自己就会建这个文件，用来存 cookie 的签名密钥
   # （records: client-connection/browser-session），里面并没有任何 API key。2026-09-03
@@ -353,6 +384,7 @@ case "${1:-help}" in
   smoke)        shift; cmd_smoke "$@" ;;
   start)        shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; --no-wait) WAIT=0; shift;; *) shift;; esac; done; cmd_start ;;
   autostart)    shift; cmd_autostart "$@" ;;
+  engine-running) shift; cmd_engine_running ;;
   stop)         shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; *) shift;; esac; done; cmd_stop ;;
   url)          shift; cmd_url ;;
   status)       shift; cmd_status ;;
