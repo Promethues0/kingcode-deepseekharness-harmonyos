@@ -20,11 +20,29 @@ HiShell 里，没有虚拟机、没有容器。
 | **Web（B 级）** | ✅ 全通 | 全局 dsh 原生 boot；`GET /` 401 → `?token=` 303 换 cookie → 200；`/api` 到网关；鸿蒙 ArkWeb 壳连 `127.0.0.1:3081` 加载出完整工作区（品牌层、侧栏、KingCode 预设、设置→模型页「API 密钥已配置」）；**在壳里发一条真消息拿到回答**——2 次工具调用，bash 经 node-pty 回 `HongMeng Kernel 1.13.0 … aarch64 Toybox`，grep 经 ripgrep 数出 26 行，20K token / 11 秒 / 89 tok/s / 缓存命中 46%（DeepSeek-V4-Pro High，完全权限） |
 | 上架应用市场（C 级） | ❌ 未做 | 应用沙箱（normal_hap 域）有 neverallow 限制，是另一条路 |
 
+> **这张表说的是「这台设备上跑通过」，不是「clone 下来就跑得通」。** A/B 级的证据产于
+> 一套手工命令序列，`scripts/kc-hmos` 是事后封装的；从零 `git clone` → 能用这条整链
+> 尚未一次性复跑过。2026-09-03 的一轮审计（六维度 + 对抗性核实）在其中挖出并修掉了
+> 若干真缺陷，最硬的一个是 README 教的 `ln -sf` 装法会让脚本找不到自己的 `env.sh`
+> ——除 `url`/`stop` 外每个子命令都死在第一句（`$0` 是软链、`HERE` 没解引用）。
+> 现在 `kc-hmos` 会 `readlink -f "$0"`，`install-web` 的三处静默跳过全改成硬失败，
+> `patch-node-modules.sh` 的自检也进退出码了。**修完在真机上验过（09-03 14:51，经软链调用）**：
+> `help` 干净、`doctor` 跑通（rc=0，且新增的版本/必需品/凭证三节在真机上都对）、
+> `install-web` 的仓库守卫与 `url` 的「引擎没在跑就不给旧 token」都按预期 rc=1。
+> **整链从零复跑那次没做完**——当天设备出网整体断（`github` / `registry.npmjs.org` 都
+> `http=000`，`git clone` 68 秒超时；同一时刻 `api.deepseek.com` 却回 401），
+> 卡在第一步 clone，与本套件无关。这条仍记在「还没做的」里。
+
+
 ## 三步装完
 
+前提：**Harmonybrew 已装好**（见下节门槛与安装入口）。`git` 和 `curl` 也由它提供，所以先装它们再 clone。
+
 ```sh
+brew install git curl                                  # clone 与体检要用；deps 里也会再装一次（幂等）
+
 git clone https://github.com/Promethues0/kingcode-deepseekharness-harmonyos.git ~/kc-hmos
-git clone https://github.com/Promethues0/kingcode.git ~/kingcode   # 想复现本文记录的状态就 checkout 到对应提交
+git clone https://github.com/Promethues0/kingcode.git ~/kingcode
 ln -sf ~/kc-hmos/scripts/kc-hmos ~/.harmonybrew/bin/kc-hmos
 
 kc-hmos deps          # Harmonybrew 依赖（ohos-sdk 2.7 GB，慢）
@@ -32,14 +50,45 @@ kc-hmos install-cli   # A 级：仓库依赖 + 现编 node-pty + 打补丁
 kc-hmos smoke         # 判据：恰好死在 MISSING_CREDENTIAL
 
 kc-hmos install-web   # B 级：全局 dsh + sharp WASM + 补丁 + profile/preset
-kc-hmos start         # 起 Web 引擎
+DEEPSEEK_API_KEY=sk-... kc-hmos start    # 起 Web 引擎（key 见下）
 kc-hmos url           # 打印带 token 的地址，浏览器/鸿蒙壳里首次用它
 ```
 
-带钥跑：把 `.credentials.yaml` 放进 `$DSH_HOME`（**必须在 el2 上**，见第 2 节），或
-`DEEPSEEK_API_KEY=sk-... kc-hmos smoke`。
+**`install-cli` 不能跳。** 它不只是「CLI 形态」——`profile/setup.sh` 是把仓库 **link** 进
+profile 而不是拷贝，preset 里 `kingcode/plugins/env-context.js` 的
+`import z from '@deepseek-ai/schemastery'` 从仓库原位往上解析，命中的是
+`~/kingcode/node_modules`。跳过它，Web 引擎能起、工作区能开，一开会话就
+`ERR_MODULE_NOT_FOUND`。`install-web` 现在会先检查再往下走。
 
-`kc-hmos doctor` 一次性打印工具链、平台事实（platform / V8 lite / chmod 落位 / 硬链接）与补丁是否在位。
+### 第一次怎么把 API key 弄进去
+
+三条路，按省事排：
+
+1. **环境变量（推荐）**：`DEEPSEEK_API_KEY=sk-... kc-hmos start`。dsh 的凭证层里进程环境
+   优先级最高，`nohup` 起的引擎继承调用 shell 的环境。CLI 侧同理：`DEEPSEEK_API_KEY=sk-... kc-hmos smoke`。
+2. **在界面里填**：引擎起来后进设置 → 模型 → DeepSeek → 编辑，填 key 保存。
+   **只有 loopback 能这么干**——dsh 客户端按页面 hostname 自己关闸
+   （`dsh-client-ui-settings` 里 `persistence = $host.isLoopback ? "host" : "memory"`），
+   非 loopback 的页面 describe 镜像根本不发请求，「模型」页会报
+   `settings are unavailable in this browser`。原生形态连的正是 `127.0.0.1`，所以这条通。
+3. **落盘**：写 `$DSH_HOME/.credentials.yaml`（默认 `/data/storage/el2/base/kingcode-home/.credentials.yaml`）。
+   **格式不是 `deepseek: apiKey:`**，是：
+
+   ```sh
+   cat > "$DSH_HOME/.credentials.yaml" <<'YAML'
+   version: 1
+   refs:
+     DEEPSEEK_API_KEY: sk-你的key
+   YAML
+   chmod 600 "$DSH_HOME/.credentials.yaml"      # 少这一步 dsh 直接拒绝启动
+   ```
+
+   那个 `chmod 600` 是硬的：`dsh-credentials-local` 见到组/其他位不为 0 就
+   `throw ... is readable beyond its owner`。这也正是 `DSH_HOME` 必须放 el2 的原因（见第 2 节）。
+
+`kc-hmos doctor` 一次性打印工具链、平台事实（platform / V8 lite / chmod 落位 / 硬链接）、
+**三处 dsh 版本是否分叉**、**profile / preset / sharp 三件必需品**、**凭证在不在与它的 mode**、
+以及补丁是否在位。`kc-hmos start` 超时时先看它。
 
 ## 依赖清单
 
@@ -51,9 +100,10 @@ kc-hmos url           # 打印带 token 的地址，浏览器/鸿蒙壳里首次
 | `make` `cmake` `ninja` | 原生模块构建 | 本套件只现编 node-pty；koffi 走桩，不构建（见第 1 节对照） |
 | `python@3.12` | node-gyp 需要 | |
 | `ripgrep` | 文件搜索 | `@vscode/ripgrep` 没有 openharmony 平台包 |
-| `git` `bash` `pnpm` | 仓库、`profile/setup.sh`、`dsh plugin` | 系统只有 zsh，`profile/setup.sh` 是 bash 脚本 |
+| `git` `bash` `pnpm` | 仓库、`profile/setup.sh`、`dsh plugin` | 系统只有 zsh，`profile/setup.sh` 是 bash 脚本；`git` 在第一条 clone 就要用，所以三步块里先单独装它 |
+| `curl` | `kc-hmos status` 的端口探活与出网体检 | 缺了不报错，只是那两行静默消失——排障时看到的是一份残缺报告 |
 
-Harmonybrew 门槛：HarmonyOS 6.1.0.117 以上，且要开**开发者选项**与**运行来自非应用市场的扩展程序**。
+Harmonybrew 本身的安装见 <https://harmonybrew.atomgit.com>；门槛是 HarmonyOS 6.1.0.117 以上，且要开**开发者选项**与**运行来自非应用市场的扩展程序**。本文所有实测都在 7.0.0.102 / API 26 / Kernel 1.13.0 的一台 MateBook 14 上——**这套方案的四条地基（el2 是 hmfs、家目录 hmdfs 的 chmod 是 no-op、`/tmp` 只读 erofs、全盘禁硬链接）在别的机型或 6.1 上是否同样成立，没有验过**。`kc-hmos doctor` 里的 chmod 与硬链接两项探针就是拿来当场核这件事的，红了就别往下走。
 
 ---
 
@@ -65,12 +115,16 @@ Harmonybrew 门槛：HarmonyOS 6.1.0.117 以上，且要开**开发者选项**�
 | 补丁 | 真机事实 | 做法 |
 |---|---|---|
 | ① koffi 桩 | `dsh-subprocess-local` 顶层 `import koffi` 且加载期就调 `koffi.pointer("void")`；全局树里 `dsh-win32-process` 还在加载期断言两个 Win32 结构体大小（`STARTUPINFOW` 104、`PROCESS_INFORMATION` 24）。openharmony 无原生产物，加载即炸；而 koffi 的**全部实际调用都在 win32 分支** | 惰性桩：`struct()` 按名字查一张大小表让加载期断言过，`load/alloc/encode/decode` 一律 throw，桩不碰任何 `.node` |
-| ② 终端检查器 | `createProcessInspector` 对非 linux/darwin/win32 直接 throw（首次开终端才触发）；`/proc` 在，293 项可读 | openharmony 走 `LinuxProcessInspector` |
+| ② 平台闸（**两处**） | 同一个文件里有两处 `platform === "linux"`：`createProcessInspector` 对非 linux/darwin/win32 直接 throw（首次开终端才触发，响亮）；`treeAlive` 里「进程组只剩僵尸就判死」那条精化（静默降级——判据退回只剩 `kill(-pid,0)`，`observeTreeExit` 的循环不收敛，表现为 bash 工具调用迟迟不收尾） | 两处都放开给 openharmony，走 `LinuxProcessInspector` / 走僵尸组判定 |
 | ③ 会话落盘 | `dsh-session-persistence-jsonl` 用 `link()` 做原子发布。**鸿蒙全盘禁硬链接**：家目录（hmdfs）EPERM、el2/base（hmfs）EACCES、`/tmp` EROFS | link 失败即 `open(wx)` 占位 + `rename`，保住「不存在才创建」的语义 |
 | ④ 写工具新建文件 | `dsh-fs-local` 的 createIfAbsent 同样走 `link()` | 同 ③ |
 | ⑤ ripgrep | `@vscode/ripgrep` 按 `ripgrep-${platform}-${arch}` 解析平台包，没有 openharmony；`dsh-tool-fs-search` 的 `execPath-rg` 侧车**只在 pkg 打包的二进制里生效**，普通 node 进程走不到 | 造一个本地平台包 `@vscode/ripgrep-openharmony-arm64`，`bin/rg` 软链到 Harmonybrew 的 rg |
 
 Web 形态（`--global`）多一处：`dsh-attachment-local` 的附件落盘也走 `link()`，同 ③。
+**这一处要连着改两个地方**：回退用 `rename` 把 `temporary` 搬走之后，紧跟其后的裸
+`await unlink(temporary)` 必抛 `ENOENT`，被外层 catch 统一翻成 `ATTACHMENT_WRITE_FAILED`——
+字节其实已经落盘了。症状是「任何新图第一次贴报保存失败、同一张图重贴一次就成功」
+（第二次走 `EEXIST` 分支，`temporary` 还在），非常像间歇性故障。
 
 不是补丁、但必须做的三件：`DSH_HOME` 放 el2、`KINGCODE_LSP=0`、node-pty 用本机 clang 现编。
 
@@ -151,10 +205,32 @@ export DSH_PERMISSION_MODE=danger-full-access
 
 `kc-hmos status` 因此把首页 **401 判成「活着」**——那是认证生效的正常态，只有连不上（000）才是死了。
 
-## 6. 鸿蒙客户端壳（可选）
+## 6. 鸿蒙客户端壳（可选，而且**装不了的人只能走浏览器**）
 
-[KingCode 仓库的 `harmony/`](https://github.com/Promethues0/kingcode/tree/main/harmony) 是个
-ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态下它连 `127.0.0.1:3081`，
+先把话说死：**本项目不提供、也无法提供预编译的 `.hap`。** 这不是懒，是 HarmonyOS 的分发模型：
+
+- **调试签名绑设备**。我从本机产物里解出 provision profile 核过：`type: debug`、
+  `issuer: app_gallery`、`bundle-name: com.kingcode.client`、`debug-info.device-ids` 是一串
+  **具体的设备 UDID**、有效期整 365 天。换台机器装，UDID 不在名单里就被拒。调试设备还有
+  100 台/年的额度上限。
+- **未签名的 hap 直接被拒**：`code:9568320 error: no signature file`。
+- **发布证书签的 hap 反而更装不上**：`hdc install` 报 `9568322`（签名来源不受信任），
+  release 只走应用市场。
+- 「任何人下载即可装」的形态只有 AGC 内测/公测或上架——那是 C 级，要实名开发者账号 + 审核。
+
+所以要用壳，你得自己构建：**另一台 Windows 或 macOS 电脑**（DevEco Studio 没有鸿蒙 PC 版，
+仓库里也没有 `hvigorw`，鸿蒙 PC 自己造不出这个 hap）+ **一个华为开发者账号**（自动签名要
+向 AGC 换取调试证书与 profile）+ 把鸿蒙 PC 连上去 Run。还有一处会撞车：`com.kingcode.client`
+这个 bundleName 已被本项目作者的 AGC 账号占用，**你要在 `AppScope/app.json5` 里换成自己的**。
+入库的工程是 `"signingConfigs": []`，首次 Build 不会失败，只会打一条
+`WARN Will skip sign 'hos_hap'` 然后产出 unsigned hap——照着装就是 9568320。
+
+**没有壳也能用**：`kc-hmos url` 那条地址在系统自带浏览器里同样能开（原生形态是 `127.0.0.1`，
+loopback 属安全上下文，剪贴板与设置面都不降级）。**但这条路我们只在虚拟机路线的模拟器上验过，
+真机 + 127.0.0.1 + alpha.5 的 token→cookie 组合一次都没跑过**，见「还没做的」。
+
+[KingCode 仓库的 `harmony/`](https://github.com/Promethues0/kingcode/tree/main/harmony) 是那个
+ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
 比连虚拟机 IP 少一整类问题：不用绑 `0.0.0.0`、没有 `/api` 信任名单与 IP 漂移、loopback 是安全
 上下文所以剪贴板可用、设置面不再降级成 memory 模式。
 
@@ -194,7 +270,12 @@ ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态
    或者改用 **`uitest uiInput inputText <x> <y> '<文本>'`**——它按坐标直接写入，不走键盘，大小写如实。
    另外 Ctrl+A 在 WebView 里会选中整页并弹出上下文菜单，把后续输入全吃掉。
 2. **官方 npm 源不稳**。参考项目直接说官方源不可用、必须 `--registry=https://registry.npmmirror.com`；
-   我们 09-02 晚用官方源装成功，09-03 早上两个域名都 `http=000`。`kc-hmos` 留了 `KC_REGISTRY`。
+   我们 09-02 晚用官方源装成功，09-03 早上两个域名都 `http=000`。`kc-hmos` 留了 `KC_REGISTRY`，
+   但**它只盖住 `kc-hmos` 自己发的三条 npm 命令**——`profile/setup.sh` 里 `dsh plugin add` 走的是
+   pnpm，不在伞下。要一次盖全就写进 `~/.npmrc`：`npm config set registry <mirror>`（npm 与 pnpm 都读它）。
+   还有第三条独立路径：**node-gyp 取 node headers 走 `disturl`，既不跟 registry 也不跟镜像**，
+   而这条路上要现编两次 node-pty。`env.sh` 认 `KC_NODE_DISTURL`（姊妹路径
+   `deploy/harmonyos-pc/install.sh` 早就有这个旋钮，原生路线以前漏了）。
 3. **出网 TLS 层会整体断**。09-03 上午实测：DNS 解析正常（19 ms）、TCP 连接成功（36 ms），但
    HTTPS 拿不到响应，`api.deepseek.com` 与 `registry.npmjs.org` 同时 `http=000`。表现在 Web UI 里
    就是 `本轮运行失败 DeepSeek API request to https://api.deepseek.com failed` / `TRANSPORT`，
@@ -227,18 +308,47 @@ ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态
 | 起停 | `dsh-hmos` 脚本，多实例 / status / restart / 版本门控 | `setsid` + mkdir 原子锁 + HTTP 探活 | `kc-hmos`，含 `doctor` 与出网体检 |
 | 开机自启 | 无 | 四层钩子（/etc/profile、.zshenv、.zshrc、XDG autostart），实测 1–3 分钟延迟 | 无 |
 
-**最值得从它们那里抄的**：`dsh-hmos` 的版本门控（npm reify 每次都会重解包整棵树、把补丁冲掉，
-所以要先比对版本再决定装不装）、`setsid` + mkdir 锁比 nohup + PID 文件抗环境差异、以及那套开机自启钩子。
+**最值得从它们那里抄的，只有一件：`dsh-hmos` 的版本门控。** 它挡的是「重复安装把补丁冲掉」——
+而这在我们这边有一个更硬的版本：`npm i -g @deepseek-ai/dsh@0.1.2-alpha.5` **只钉住顶层那一个包**，
+它下面 ~70 个 `dsh-*` 依赖全是 `^0.1.2-alpha.3`，全局安装目录里连 `.package-lock.json` 都没有。
+今天恰好装出 alpha.5（因为它就是最高发布版），上游一发 alpha.6，五处补丁的锚点包就换了树。
+锚点变了会 fail-loud（NOMATCH → `install-web` die），锚点没变而语义变了则是静默不对。
+**这是这套东西目前最短的一根引信。**
+
+另两件被我们早先列为「值得抄」的，其实解决的不是「即装即用」：`setsid` + mkdir 锁对我们无效
+（实测 `setsid` 挡不住关窗口，见上一节）；开机自启钩子解决的是「怎么自动跑起来」，
+解决不了「窗口关了怎么办」——参考项目自己也记了 1–3 分钟延迟、有时还要手动开一次 HiShell。
+
 **我们这边多出来的**：`dsh-fs-local` 那处硬链接（写工具新建文件会 `FS_IO_ERROR`，前两家都会踩）、
-alpha 通道的会话认证、以及 el2 换 home 这条免补丁的路。
+`dsh-attachment-local` 回退之后那处必抛 ENOENT 的清理（症状是「新图第一次贴必报保存失败、
+重贴一次就成功」，像间歇性故障）、`dsh-subprocess-local` 里**第二处** `platform === "linux"` 闸
+（`treeAlive` 的僵尸组精化，不开是静默降级成工具调用不收尾）、alpha 通道的会话认证，
+以及 el2 换 home 这条免补丁的路。
 
 ## 还没做的
 
-- 从零 `npm ci --ignore-scripts` 的完整顺序没复跑过——现在设备上这棵树是逐步摸出来的。
+**卡在「即装即用」上的：**
+
+- **从零 `git clone` → 能用这条整链没有一次性复跑过。** 设备上现有的树是逐步摸出来的；
+  `kc-hmos` 是事后封装。这是本文最大的未知数，其余几条都比它轻。
+- **浏览器那条路没在真机上验过**。壳对大多数人装不上（第 6 节），所以「Web 工作区里发一条
+  消息拿到回答」实际上压在系统自带浏览器上——而它能不能打 `127.0.0.1`、地址栏吃不吃带
+  `?token=` 的长地址、cookie 会不会有落盘窗口，一条记录都没有。
+- **全局树没有锁**：`npm i -g dsh@<版本>` 只钉顶层，~70 个子依赖是 caret，没有
+  `.package-lock.json`。上游一发新 alpha，补丁锚点就换了树（见对照那节）。
+- **B 级链路没在 alpha.5 上复跑**：那次真机记录跑的是全局 alpha.3（补丁锚点已在 alpha.5 上
+  逐字复核过、且唯一，但链路本身没重跑）。
+
+**别的：**
+
 - ~~关掉 HiShell 窗口后引擎是否存活~~ —— **已验，答案是不存活**（见「引擎的生命周期」一节）。
 - 开机自启：能做的只有「开机自动打开 HiShell 并拉起引擎」，窗口仍必须留着。
-- 向上游提三件事（只开 Discussions）：把 `openharmony` 当 POSIX 认、`link()` EPERM 回落 rename、
-  koffi 改惰性加载——合入后 ①②③④ 都不再需要。
+- 卸载 / 备份：没有 `kc-hmos uninstall`；而 `DSH_HOME` 在 el2，是 HiShell 的应用数据，
+  **清 HiShell 数据 = 会话、凭证、设置一起没**，怎么备份这个目录也还没写。
+- 多用户：`DSH_HOME` 与 `~/.harmonybrew` 都是 per-user 的，一台机器换系统用户会怎样，没验过。
+- 向上游提三件事（只开 Discussions）：把 `openharmony` 当 POSIX 认（注意
+  `dsh-subprocess-local` 里有**两处** `platform === "linux"`，不只 `createProcessInspector`）、
+  `link()` EPERM 回落 rename、koffi 改惰性加载——合入后 ①②③④⑤ 都不再需要。
 
 ## 许可
 

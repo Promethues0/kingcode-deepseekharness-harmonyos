@@ -1,7 +1,7 @@
 #!/bin/sh
 # kc-hmos —— KingCode 在鸿蒙 PC（HiShell）上的一键脚本。
 #
-#   kc-hmos deps                装齐 Harmonybrew 依赖（node cmake make ninja python@3.12 ohos-sdk llvm-gcc-compat git ripgrep bash pnpm）
+#   kc-hmos deps                装齐 Harmonybrew 依赖（node cmake make ninja python@3.12 ohos-sdk llvm-gcc-compat git curl ripgrep bash pnpm）
 #   kc-hmos install-cli         装 KingCode 仓库依赖 + 现编 node-pty + 打补丁（A 级，CLI 形态）
 #   kc-hmos install-web         装全局 dsh + 现编 node-pty + sharp WASM + 打补丁 + profile/preset（B 级，Web 形态）
 #   kc-hmos patch [--global]    只重打补丁（npm install / 升级之后必做）
@@ -10,10 +10,12 @@
 #   kc-hmos url                 打印带 token 的地址（首次进浏览器/鸿蒙壳用它换 cookie）
 #   kc-hmos status              进程 / 端口 / 出网 / 就绪行 / DSH_HOME 五项体检
 #   kc-hmos stop                停引擎
-#   kc-hmos doctor              环境自检（工具链、平台事实、补丁是否在位）
+#   kc-hmos doctor              环境自检（工具链、平台事实、版本分叉、profile/preset/sharp、凭证、补丁是否在位）
 #
 # 环境变量：KINGCODE_REPO（默认 ~/kingcode）、DSH_HOME（默认 /data/storage/el2/base/kingcode-home）、
-#          KC_PORT（默认 3081）、KC_REGISTRY（默认空=官方源；官方源不通时用 https://registry.npmmirror.com）、
+#          KC_PORT（默认 3081）、KC_REGISTRY（默认空=官方源；官方源不通时用 https://registry.npmmirror.com——
+#          注意它只盖住 npm，pnpm 那步走 `npm config set registry` 才一并覆盖）、
+#          KC_NODE_DISTURL（node-gyp 取 node headers 的镜像，不受 KC_REGISTRY 管）、
 #          KC_DSH_VERSION（全局 dsh 的版本，默认 0.1.2-alpha.5；别省，latest 指着另一条线）
 #
 # 设计上的两条硬约束，别绕开（真机实测，见 README）：
@@ -23,7 +25,13 @@
 # - **DSH_HOME 必须落在 /data/storage/el2/base**：家目录是 hmdfs，chmod 600 落成 660，
 #   dsh-credentials-local 会拒绝启动。
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
+# **必须解符号链接**：README 教的装法是 `ln -sf .../scripts/kc-hmos ~/.harmonybrew/bin/kc-hmos`，
+# 而 $0 是那个软链自身。不解的话 HERE 落在 ~/.harmonybrew/bin，那儿没有 env.sh /
+# patch-node-modules.sh / smoke.sh —— POSIX sh 里 `.` 找不到文件会让脚本当场终止，
+# 除 url/stop 外每一个子命令都死在第一句，而报错指向一个用户没见过的路径。
+SELF="$0"
+[ -L "$SELF" ] && SELF="$(readlink -f "$SELF")"
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
 REPO="${KINGCODE_REPO:-$HOME/kingcode}"
 PORT="${KC_PORT:-3081}"
 KC_DSH_VERSION="${KC_DSH_VERSION:-0.1.2-alpha.5}"
@@ -39,13 +47,16 @@ info() { printf '  %s\n' "$*"; }
 die()  { printf 'kc-hmos: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-load_env() { . "$HERE/env.sh"; }
+load_env() {
+  [ -f "$HERE/env.sh" ] || die "找不到 $HERE/env.sh（kc-hmos 要和 env.sh / patch-node-modules.sh / smoke.sh 同目录）"
+  . "$HERE/env.sh" || die "env.sh 执行失败（$DSH_HOME 建不出来？）"
+}
 
 cmd_deps() {
   have brew || die "先装 Harmonybrew：https://harmonybrew.atomgit.com （需开「开发者选项」与「运行来自非应用市场的扩展程序」）"
   # ohos-sdk 提供 clang（2.7 GB）；llvm-gcc-compat 把它软链成 gcc/cc/ld/ar 这些 GNU 名字，
   # node-gyp 的 Makefile 默认 CC=cc，没有它会报 cc: command not found。
-  for p in node cmake make ninja python@3.12 ohos-sdk llvm-gcc-compat git ripgrep bash pnpm; do
+  for p in node cmake make ninja python@3.12 ohos-sdk llvm-gcc-compat git curl ripgrep bash pnpm; do
     printf '==> brew install %s\n' "$p"; brew install "$p" || die "装 $p 失败"
   done
   cmd_doctor
@@ -72,27 +83,41 @@ cmd_install_cli() {
 }
 
 cmd_install_web() {
+  # Web 形态也要仓库那棵树：profile/setup.sh 是把仓库 **link** 进 profile（不是拷贝），
+  # preset 里 kingcode/plugins/env-context.js 的 `import z from '@deepseek-ai/schemastery'`
+  # 从仓库原位往上解析，命中的是 $REPO/node_modules。没跑过 install-cli 的话，
+  # 引擎能起、工作区能开，一开会话就 ERR_MODULE_NOT_FOUND——线索指不回这里。
+  [ -f "$REPO/package.json" ] || die "找不到 KingCode 仓库：$REPO（用 KINGCODE_REPO 指定）"
+  [ -d "$REPO/node_modules/@deepseek-ai/schemastery" ] \
+    || die "先跑 kc-hmos install-cli —— Web 形态的 preset 从 $REPO/node_modules 解析插件依赖"
+  [ -x "$REPO/profile/setup.sh" ] || die "找不到 $REPO/profile/setup.sh（仓库不完整？）"
   load_env
   have npm || die "没有 npm（brew install node）"
   # **必须显式钉版本**：@deepseek-ai/dsh 的 latest dist-tag 指着 0.1.1-rc.2（另一条小版本线），
   # 不钉就会装到一棵没有会话认证的树——本 README 第 5 节整节都不成立，而且补丁锚点也对不上。
   info "npm i -g @deepseek-ai/dsh@$KC_DSH_VERSION --ignore-scripts"
   npm i -g "@deepseek-ai/dsh@$KC_DSH_VERSION" --ignore-scripts $REG || die "装全局 dsh 失败"
-  rebuild_node_pty "$GLOBAL_DSH"
   # sharp：dsh-attachment-local 加载期就 require 它，没有 openharmony 原生二进制，用 WASM 后端。
-  # 注意它连带 @emnapi/runtime；某些镜像上 @img/sharp-wasm32 会 404，那就从另一台机器拷这三个目录。
-  sv="$(node -p "require('$GLOBAL_DSH/node_modules/sharp/package.json').version" 2>/dev/null)"
-  if [ -n "$sv" ]; then
-    info "sharp $sv → 装 WASM 后端"
-    ( cd "$GLOBAL_DSH" && npm install --no-save --ignore-scripts $REG "@img/sharp-wasm32@$sv" ) \
-      || info "！@img/sharp-wasm32 装不上（镜像可能没有）。从另一台机器拷 @img/sharp-wasm32、@emnapi/runtime、tslib 三个目录到 $GLOBAL_DSH/node_modules"
-  fi
+  # 注意它连带 @emnapi/runtime。**这一步失败必须 die**：缺了 Web 引擎 boot 不起来，
+  # 而以前只打一行提示就继续，用户看到「完成」、然后 start 空等 90 秒才发现。
+  sv="$(node -p "require('$GLOBAL_DSH/node_modules/sharp/package.json').version" 2>/dev/null || true)"
+  [ -n "$sv" ] || die "全局树里没有 sharp（$GLOBAL_DSH/node_modules/sharp）——上一步的 dsh 没装全？"
+  info "sharp $sv → 装 WASM 后端"
+  ( cd "$GLOBAL_DSH" && npm install --no-save --ignore-scripts $REG "@img/sharp-wasm32@$sv" ) || die \
+"装 @img/sharp-wasm32@$sv 失败。这个包在官方源上是有的（0.35.4 实探 200），失败基本是源/出网问题：
+    ① npm config set registry https://registry.npmmirror.com   （npm 与 pnpm 都读 ~/.npmrc）
+    ② 或 KC_REGISTRY=… kc-hmos install-web
+    ③ 断网兜底：从另一台机器把 @img/sharp-wasm32、@emnapi/runtime、tslib 三个目录拷到
+       $GLOBAL_DSH/node_modules（tar 时路径写 ./@img/... ）"
+  # **node-pty 现编必须排在所有 npm 操作之后**：全局树没有 lockfile（连 .package-lock.json
+  # 都没有），上面那次 npm install 是整棵树重解析重解包，会把 pty.node 一起冲掉，
+  # 而补丁能在下一步补回来、pty.node 没有任何东西补。
+  rebuild_node_pty "$GLOBAL_DSH"
   sh "$HERE/patch-node-modules.sh" --global || die "打补丁失败"
-  if [ -x "$REPO/profile/setup.sh" ]; then
-    info "装 profile 与 preset（品牌层、KingCode 预设）"
-    ( cd "$REPO" && bash profile/setup.sh ) || die "profile/setup.sh 失败"
-  fi
+  info "装 profile 与 preset（品牌层、KingCode 预设）"
+  ( cd "$REPO" && bash profile/setup.sh ) || die "profile/setup.sh 失败"
   info "完成。起服务： kc-hmos start"
+  info "第一次要带上 key： DEEPSEEK_API_KEY=sk-... kc-hmos start   （或起来之后在设置→模型页填，见 README）"
 }
 
 cmd_patch() { load_env; sh "$HERE/patch-node-modules.sh" "$@"; }
@@ -104,22 +129,37 @@ cmd_start() {
   load_env
   [ -n "$(engine_pid)" ] && { info "已经在跑（pid $(engine_pid)）"; cmd_url; return 0; }
   have dsh || die "没有 dsh（kc-hmos install-web）"
+  # profile 不在就别起：dsh 会以 `profile "kingcode" does not exist` 退出，而那条报错
+  # 埋在 90 秒之后的日志尾部里，用户只会以为「start 坏了」。
+  [ -f "$DSH_HOME/profiles/kingcode/package.json" ] \
+    || die "$DSH_HOME/profiles/kingcode 不存在——先跑 kc-hmos install-web（它会调 profile/setup.sh）"
   DSHBIN="$(readlink -f "$(command -v dsh)")"
   info "起引擎：node --expose-internals $DSHBIN --profile kingcode --port $PORT"
   # nohup + --expose-internals：后者是硬要求，理由见文件头注释。
+  # 环境是继承的，所以 `DEEPSEEK_API_KEY=sk-... kc-hmos start` 直接生效
+  # （dsh 的凭证层里，进程环境优先级最高）。
   nohup node --expose-internals "$DSHBIN" --profile kingcode --port "$PORT" --no-open > "$LOG" 2>&1 &
   i=0
   while [ $i -lt 45 ]; do
     sleep 2
-    grep -q 'dsh web: http' "$LOG" 2>/dev/null && { info "就绪"; cmd_url; return 0; }
+    grep -q 'dsh web: http' "$LOG" 2>/dev/null && {
+      info "就绪"
+      cmd_url
+      info "注意：引擎的命寿绑在这个 HiShell 窗口上——切后台没事，关掉窗口引擎立刻死（setsid 也挡不住）。"
+      return 0
+    }
     i=$((i+1))
   done
-  info "等了 90s 没看到就绪行，日志尾部："; tail -15 "$LOG"; return 1
+  info "等了 90s 没看到就绪行。先跑 kc-hmos doctor 看是哪一项没到位（profile / sharp / 补丁 / node-pty），"
+  info "日志尾部："; tail -15 "$LOG"; return 1
 }
 
 ready_line() { grep 'dsh web: http' "$LOG" 2>/dev/null | tail -1; }
 
 cmd_url() {
+  # 日志跨重启保留，而关掉 HiShell 窗口引擎必死——不查进程就打印，会给出一条指向
+  # 死进程的旧 token 地址；token 每进程一枚，旧的换不到 cookie。
+  [ -n "$(engine_pid)" ] || { info "引擎没在跑（kc-hmos start）。日志里那条就绪行是上一次的，token 已失效。"; return 1; }
   u="$(ready_line | grep -o "http://127.0.0.1:$PORT/?token=[A-Za-z0-9_-]*" | head -1)"
   [ -n "$u" ] || { info "日志里还没有带 token 的就绪行"; return 1; }
   printf '  浏览器 / 鸿蒙壳里首次打开这个地址（换一枚 30 天有效的 cookie，之后用干净地址即可）：\n  %s\n' "$u"
@@ -173,6 +213,27 @@ cmd_doctor() {
   a="$HOME/.kc-link-a"; b="$HOME/.kc-link-b"; : > "$a" 2>/dev/null
   if ln "$a" "$b" 2>/dev/null; then printf '  %-22s %s\n' '硬链接' '可用（意外——补丁③④可不打）'; else printf '  %-22s %s\n' '硬链接' '禁止（补丁③④必需）'; fi
   rm -f "$a" "$b"
+  echo '── 版本 ──'
+  printf '  %-22s %s\n' '全局 dsh' "$(node -p "require('$GLOBAL_DSH/package.json').version" 2>/dev/null || echo '缺')"
+  printf '  %-22s %s\n' '仓库钉的 dsh-agent' "$(node -p "require('$REPO/package.json').dependencies['@deepseek-ai/dsh-agent']" 2>/dev/null || echo '缺')"
+  printf '  %-22s %s\n' 'kc-hmos 钉的版本' "$KC_DSH_VERSION （三者小版本要一致；仓库 main 升级后这里会先分叉）"
+  echo '── Web 形态的三件必需品 ──'
+  [ -f "$DSH_HOME/profiles/kingcode/package.json" ] \
+    && printf '  %-22s %s\n' 'profile' "在（$DSH_HOME/profiles/kingcode）" \
+    || printf '  %-22s %s\n' 'profile' "缺 —— kc-hmos start 会以「profile does not exist」退出（跑 install-web）"
+  [ -d "$DSH_HOME/.agent-presets/kingcode" ] \
+    && printf '  %-22s %s\n' 'kingcode preset' '在' \
+    || printf '  %-22s %s\n' 'kingcode preset' '缺 —— 客户端里模型不会姓 KingCode（跑 install-web）'
+  [ -d "$GLOBAL_DSH/node_modules/@img/sharp-wasm32" ] \
+    && printf '  %-22s %s\n' 'sharp WASM 后端' '在' \
+    || printf '  %-22s %s\n' 'sharp WASM 后端' '缺 —— dsh-attachment-local 加载期就 require sharp，引擎起不来'
+  echo '── 凭证 ──'
+  if [ -f "$DSH_HOME/.credentials.yaml" ]; then
+    m="$(stat -c '%a' "$DSH_HOME/.credentials.yaml" 2>/dev/null || echo '?')"
+    printf '  %-22s %s\n' '.credentials.yaml' "在（mode $m；不是 600 的话 dsh 会拒绝启动）"
+  else
+    printf '  %-22s %s\n' '.credentials.yaml' '没有 —— 用 DEEPSEEK_API_KEY=sk-... kc-hmos start，或起来后在设置→模型页填'
+  fi
   echo '── 补丁是否在位 ──'
   for root in "$REPO/node_modules" "$GLOBAL_DSH/node_modules"; do
     [ -d "$root" ] || continue
@@ -199,6 +260,6 @@ case "${1:-help}" in
   url)          shift; cmd_url ;;
   status)       shift; cmd_status ;;
   doctor)       shift; cmd_doctor ;;
-  help|-h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|-h|--help) sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//' ;;
   *) die "未知子命令：$1（kc-hmos help）" ;;
 esac

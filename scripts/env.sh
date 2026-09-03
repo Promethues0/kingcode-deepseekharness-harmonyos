@@ -15,4 +15,8 @@ export DSH_HOME="${DSH_HOME:-/data/storage/el2/base/kingcode-home}"
 export KINGCODE_LSP=0
 export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
 export TMPDIR="${TMPDIR:-$HOME}"
+# node-gyp 取 node headers 走 disturl，**不跟 npm registry**——它是全流程里唯一一个
+# 既不受 KC_REGISTRY 管、又必须出网的下载，而这条路上要现编两次 node-pty。
+# 姊妹路径 deploy/harmonyos-pc/install.sh 早就有这个旋钮，原生路线以前没有。
+if [ -n "${KC_NODE_DISTURL:-}" ]; then export npm_config_disturl="$KC_NODE_DISTURL"; fi
 mkdir -p "$DSH_HOME" && chmod 700 "$DSH_HOME"
