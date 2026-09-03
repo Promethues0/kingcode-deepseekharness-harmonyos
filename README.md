@@ -26,12 +26,21 @@ HiShell 里，没有虚拟机、没有容器。
 > 若干真缺陷，最硬的一个是 README 教的 `ln -sf` 装法会让脚本找不到自己的 `env.sh`
 > ——除 `url`/`stop` 外每个子命令都死在第一句（`$0` 是软链、`HERE` 没解引用）。
 > 现在 `kc-hmos` 会 `readlink -f "$0"`，`install-web` 的三处静默跳过全改成硬失败，
-> `patch-node-modules.sh` 的自检也进退出码了。**修完在真机上验过（09-03 14:51，经软链调用）**：
-> `help` 干净、`doctor` 跑通（rc=0，且新增的版本/必需品/凭证三节在真机上都对）、
-> `install-web` 的仓库守卫与 `url` 的「引擎没在跑就不给旧 token」都按预期 rc=1。
-> **整链从零复跑那次没做完**——当天设备出网整体断（`github` / `registry.npmjs.org` 都
-> `http=000`，`git clone` 68 秒超时；同一时刻 `api.deepseek.com` 却回 401），
-> 卡在第一步 clone，与本套件无关。这条仍记在「还没做的」里。
+> `patch-node-modules.sh` 的自检也进退出码了。
+>
+> **A 级已经从零跑通一次（09-03 15:21–15:23，真机 HiShell，全程经软链调用）**：全新 clone
+> 的仓库 + 全新 `DSH_HOME`，`deps` rc=0 → `install-cli` rc=0（`npm ci --ignore-scripts` 293 包、
+> node-pty 现编出 `pty.node`、**八处补丁全 PATCHED**、自检全 OK）→ `smoke` **PASS，整棵树
+> boot 成功、恰好死在 `MISSING_CREDENTIAL`**。经软链这条路正是修之前必死的那条。
+>
+> **B 级还没跑完**：`install-web` 把全局 dsh 从 alpha.3 装到 alpha.5 用了 8 分钟（走 npmmirror），
+> 然后**卡在 sharp WASM 那一步二十多分钟没有任何进展**（不是失败、是挂住——比失败更难排查，
+> 因为 `die` 等不到）。这一条记进「还没做的」。
+>
+> 另外，当天 `github.com` / `registry.npmjs.org` / `nodejs.org` 全部 `http=000`，而
+> `registry.npmmirror.com` 200、`api.deepseek.com` 401、`gitee`/`gitcode`/`atomgit` 200
+> ——**第 0 步的 `git clone` 在这种网络下直接走不了**。这轮是在另一台机器上做 `git clone --depth 1`
+> 再把整个目录（含 `.git`）搬进设备来等价替代的，后面每一步都是设备上原样跑的。
 
 
 ## 三步装完
@@ -266,8 +275,9 @@ ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
 
 1. **CapsLock 会让自动化输入整体反转**。用 `uitest uiInput text` 驱动 HiShell 时，如果系统
    CapsLock 开着，`sh ~/x.sh` 会变成 `SH ~/X.SH`；查 `~/.zsh_history` 能看到实际落地的命令。
-   `uitest uiInput keyEvent 2074`（KEYCODE_CAPS_LOCK）不一定能改变它。两条绕法：反着打大写，
-   或者改用 **`uitest uiInput inputText <x> <y> '<文本>'`**——它按坐标直接写入，不走键盘，大小写如实。
+   `uitest uiInput keyEvent 2074`（KEYCODE_CAPS_LOCK）不一定能改变它。**`uitest uiInput inputText
+   <x> <y> '<文本>'` 也救不了**——09-03 实测它同样被反转（本文早先写它「按坐标直接写入、大小写
+   如实」，撤回）。可用的只有一条：**反着打**（要 `sh ~/x.sh` 就输入 `SH ~/X.SH`）。
    另外 Ctrl+A 在 WebView 里会选中整页并弹出上下文菜单，把后续输入全吃掉。
 2. **官方 npm 源不稳**。参考项目直接说官方源不可用、必须 `--registry=https://registry.npmmirror.com`；
    我们 09-02 晚用官方源装成功，09-03 早上两个域名都 `http=000`。`kc-hmos` 留了 `KC_REGISTRY`，
@@ -275,15 +285,27 @@ ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
    pnpm，不在伞下。要一次盖全就写进 `~/.npmrc`：`npm config set registry <mirror>`（npm 与 pnpm 都读它）。
    还有第三条独立路径：**node-gyp 取 node headers 走 `disturl`，既不跟 registry 也不跟镜像**，
    而这条路上要现编两次 node-pty。`env.sh` 认 `KC_NODE_DISTURL`（姊妹路径
-   `deploy/harmonyos-pc/install.sh` 早就有这个旋钮，原生路线以前漏了）。
+   `deploy/harmonyos-pc/install.sh` 早就有这个旋钮，原生路线以前漏了）。**注意 npm 11 已经
+   把 `npm_config_disturl` 判为未知配置**（每条 npm 命令都打一行 `npm warn Unknown env config
+   "disturl"`，并声明下个大版本停止支持），所以 `env.sh` 同时导出 node-gyp 自己认的
+   `NODEJS_ORG_MIRROR`。可用的镜像值：`https://registry.npmmirror.com/-/binary/node`
+   （09-03 实测该镜像上有 v26.8.1 的 headers）。
 3. **出网 TLS 层会整体断**。09-03 上午实测：DNS 解析正常（19 ms）、TCP 连接成功（36 ms），但
    HTTPS 拿不到响应，`api.deepseek.com` 与 `registry.npmjs.org` 同时 `http=000`。表现在 Web UI 里
    就是 `本轮运行失败 DeepSeek API request to https://api.deepseek.com failed` / `TRANSPORT`，
    重试 5 次全败。**这不是引擎的问题**——同一天网络恢复后（`api.deepseek.com` 回 `http=401`、
    `tls=0.055`）原样重试即通。`kc-hmos status` 会单独把出网列成一项，先看这里再怀疑引擎。
 4. **`/tmp` 是只读 erofs**，`TMPDIR` 要指别处（`env.sh` 指到家目录）。
-5. **`timeout` 是 toybox 版**，实测不一定能按时杀掉 node 子进程；脚本里别依赖它做硬超时。
-6. **hdc shell 与 HiShell 是两个环境**。hdc 进的是 `uid=2000 shell`、`u:r:sh:s0`，看不到
+5. **`timeout` 是 toybox 版，会真的挂死**。09-03 实测 `timeout 20 node -v`：版本号打出来了，
+   `timeout` 自己永不返回，占着前台，**Ctrl+C 也打不断**，只能开新标签页 `pkill`。
+   脚本里一律别用它。
+6. **长任务必须前台跑，而且要完全脱离终端**。`sh install.sh &` 这种后台作业会被信号挂起
+   （zsh 报 `[1] + suspended (signal)`），现象是安装到一半彻底不动、`ps` 里子进程还在但没有
+   CPU 时间。原因是只重定向了 stdout，stderr/stdin 还连着 tty。要么老老实实前台跑，
+   要么脚本里写全 `exec > log 2>&1 < /dev/null`。
+7. **屏保一上，HiShell 里的活会被冻住**。装 ohos-sdk、`npm ci`、编 node-pty 这类几十分钟的
+   步骤，中途锁屏就停在那儿。装之前先把息屏关掉（或 `hdc shell power-shell setmode 602`）。
+8. **hdc shell 与 HiShell 是两个环境**。hdc 进的是 `uid=2000 shell`、`u:r:sh:s0`，看不到
    `/storage/Users/`，`/dev/ptmx` 连 `ls` 都拒绝，硬链接拒绝，PATH 里没有 node——全是悲观值，
    **不能拿它的探针结果代表 HiShell**。两边的共享目录是 `/storage/media/100/local/files/Docs`
    （= HiShell 的家目录），递脚本、取日志走这里。
@@ -329,8 +351,10 @@ ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
 
 **卡在「即装即用」上的：**
 
-- **从零 `git clone` → 能用这条整链没有一次性复跑过。** 设备上现有的树是逐步摸出来的；
-  `kc-hmos` 是事后封装。这是本文最大的未知数，其余几条都比它轻。
+- **B 级（Web）那半条整链还没跑通**：`install-web` 会挂在 sharp WASM 那一步（09-03 实测，
+  20+ 分钟无进展、无报错）。A 级（CLI）已经从零跑通，见上面的验证说明。
+- **`install-web` 的 sharp 那步只防得住「失败」，防不住「挂住」**。现在失败会 `die`，
+  但挂住时用户看到的还是一个不动的终端。toybox 的 `timeout` 又不能用（坑 5），暂无好办法。
 - **浏览器那条路没在真机上验过**。壳对大多数人装不上（第 6 节），所以「Web 工作区里发一条
   消息拿到回答」实际上压在系统自带浏览器上——而它能不能打 `127.0.0.1`、地址栏吃不吃带
   `?token=` 的长地址、cookie 会不会有落盘窗口，一条记录都没有。
