@@ -89,6 +89,8 @@ profile 而不是拷贝，preset 里 `kingcode/plugins/env-context.js` 的
 > 用来存 cookie 的签名密钥（`records: client-connection/browser-session`），里面没有任何
 > API key。`kc-hmos doctor` 查的是文件里有没有 `DEEPSEEK_API_KEY` 这个 ref，不是文件在不在。
 
+`kc-hmos autostart on` 之后，日常使用就是「开 HiShell → 点图标」两个动作（见「引擎的生命周期」一节）。
+
 `kc-hmos doctor` 一次性打印工具链、平台事实（platform / V8 lite / chmod 落位 / 硬链接）、
 **三处 dsh 版本是否分叉**、**profile / preset / sharp 三件必需品**、**API key 到底配没配**、
 以及补丁是否在位。`kc-hmos start` 超时时先看它。
@@ -265,6 +267,14 @@ ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
 也挡不住——鸿蒙在应用终止时收走整个应用沙箱的进程组，跟 POSIX 那套「脱离控制终端就活得下去」
 不是一回事。所以 **正常使用形态是「HiShell 窗口留着、切后台」**，不是「起完就关」；
 而参考项目里那套四层开机自启钩子解决的是「怎么自动跑起来」，解决不了「窗口关了怎么办」。
+
+**能做的那一半：`kc-hmos autostart on`（开终端即自启）。** 它往 `~/.zshrc` 里加一段带标记的块，
+打开 HiShell 时若引擎没在跑就后台拉一个（`start --no-wait`，不阻塞交互 shell；已经在跑就什么都不做）。
+配上壳的默认地址之后，用户那一侧只剩两个动作：**开一次 HiShell（窗口留后台）→ 点 KingCode 图标**，
+一条命令都不用敲。2026-09-03 真机验过：`aa force-stop` 掉 HiShell 与壳、确认引擎已死 →
+只打开 HiShell → 40 秒后引擎在跑 → 点图标 → 直接是工作区。
+`autostart off` 原样删掉那段；`KC_NO_AUTOSTART=1` 临时跳过；`autostart status` 打印当前的块。
+**它仍然不是开机自启**——引擎的命还是绑在 HiShell 上。
 
 ## 已知环境坑
 

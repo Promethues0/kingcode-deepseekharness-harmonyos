@@ -168,6 +168,9 @@ cmd_start() {
   # 环境是继承的，所以 `DEEPSEEK_API_KEY=sk-... kc-hmos start` 直接生效
   # （dsh 的凭证层里，进程环境优先级最高）。
   nohup node --expose-internals "$DSHBIN" --profile kingcode --port "$PORT" --no-open > "$LOG" 2>&1 &
+  # --no-wait：起完就返回，不等就绪行。给 autostart 钩子用——在 .zshrc 里干等 90 秒
+  # 会把交互 shell 冻住。
+  [ "${WAIT:-1}" = "0" ] && { info "已拉起（--no-wait，没等就绪行）"; return 0; }
   i=0
   while [ $i -lt 45 ]; do
     sleep 2
@@ -200,6 +203,61 @@ cmd_stop() {
   kill "$p" 2>/dev/null; sleep 2
   [ -n "$(engine_pid)" ] && kill -9 "$(engine_pid)" 2>/dev/null
   info "已停（原 pid $p）"
+}
+
+# 开终端即自启。**不是开机自启**——引擎的命绑在 HiShell 上（窗口一关立刻死，setsid 也
+# 挡不住，2026-09-03 实测），所以能做的只有「打开 HiShell 就把引擎带起来」。做完之后
+# 用户那一侧就是：开一次 HiShell（窗口留后台）→ 点 KingCode 图标 → 直接进，不用敲命令。
+#
+# 写进 ~/.zshrc（HiShell 用 zsh），块用标记包起来，幂等，autostart off 原样删掉。
+# 把当前生效的 KINGCODE_REPO / DSH_HOME / KC_PORT 固化进块里，免得钩子在别的默认值下跑偏。
+AS_BEGIN='# >>> kc-hmos autostart >>>'
+AS_END='# <<< kc-hmos autostart <<<'
+ZSHRC="$HOME/.zshrc"
+
+autostart_strip() {   # 把已有的块从 $ZSHRC 里删掉（有就删，没有也不报错）
+  [ -f "$ZSHRC" ] || return 0
+  awk -v b="$AS_BEGIN" -v e="$AS_END" '
+    $0 == b { skip = 1 } { if (!skip) print } $0 == e { skip = 0 }
+  ' "$ZSHRC" > "$ZSHRC.kc-tmp" && mv "$ZSHRC.kc-tmp" "$ZSHRC"
+}
+
+cmd_autostart() {
+  load_env
+  case "${1:-status}" in
+    on)
+      autostart_strip
+      # $SELF 已经解过符号链接，指向仓库里的真身
+      {
+        echo ""
+        echo "$AS_BEGIN"
+        echo "# 打开 HiShell 就把 KingCode 引擎带起来。引擎已经在跑就什么都不做。"
+        echo "# **这不是开机自启**：引擎的命绑在 HiShell 上，窗口关掉就死。"
+        echo "# 临时跳过：KC_NO_AUTOSTART=1；彻底移除：kc-hmos autostart off"
+        echo "if [ -z \"\${KC_NO_AUTOSTART:-}\" ] && [ -z \"\${KC_AUTOSTART_DONE:-}\" ]; then"
+        echo "  export KC_AUTOSTART_DONE=1"
+        echo "  ( KINGCODE_REPO=\"$REPO\" DSH_HOME=\"$DSH_HOME\" KC_PORT=\"$PORT\" \\"
+        echo "    \"$SELF\" start --no-wait >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1"
+        echo "fi"
+        echo "$AS_END"
+      } >> "$ZSHRC"
+      info "已写进 $ZSHRC：下次打开 HiShell 会自动起引擎（端口 $PORT，DSH_HOME=$DSH_HOME）"
+      info "本次窗口不受影响；现在就要的话跑 kc-hmos start。"
+      ;;
+    off)
+      autostart_strip
+      info "已从 $ZSHRC 移除。"
+      ;;
+    status)
+      if [ -f "$ZSHRC" ] && grep -qF "$AS_BEGIN" "$ZSHRC"; then
+        info "开终端即自启：已开启（$ZSHRC）"
+        sed -n "/$(printf '%s' "$AS_BEGIN" | sed 's/[][\.*^$/]/\\&/g')/,/$(printf '%s' "$AS_END" | sed 's/[][\.*^$/]/\\&/g')/p" "$ZSHRC" | sed 's/^/    /'
+      else
+        info "开终端即自启：未开启（kc-hmos autostart on）"
+      fi
+      ;;
+    *) die "用法：kc-hmos autostart on|off|status" ;;
+  esac
 }
 
 cmd_status() {
@@ -293,7 +351,8 @@ case "${1:-help}" in
   install-web)  shift; cmd_install_web "$@" ;;
   patch)        shift; cmd_patch "$@" ;;
   smoke)        shift; cmd_smoke "$@" ;;
-  start)        shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; *) shift;; esac; done; cmd_start ;;
+  start)        shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; --no-wait) WAIT=0; shift;; *) shift;; esac; done; cmd_start ;;
+  autostart)    shift; cmd_autostart "$@" ;;
   stop)         shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; *) shift;; esac; done; cmd_stop ;;
   url)          shift; cmd_url ;;
   status)       shift; cmd_status ;;
