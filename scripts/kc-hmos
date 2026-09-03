@@ -1,0 +1,200 @@
+#!/bin/sh
+# kc-hmos —— KingCode 在鸿蒙 PC（HiShell）上的一键脚本。
+#
+#   kc-hmos deps                装齐 Harmonybrew 依赖（node cmake make ninja python@3.12 ohos-sdk llvm-gcc-compat git ripgrep bash pnpm）
+#   kc-hmos install-cli         装 KingCode 仓库依赖 + 现编 node-pty + 打补丁（A 级，CLI 形态）
+#   kc-hmos install-web         装全局 dsh + 现编 node-pty + sharp WASM + 打补丁 + profile/preset（B 级，Web 形态）
+#   kc-hmos patch [--global]    只重打补丁（npm install / 升级之后必做）
+#   kc-hmos smoke               无钥烟测（判据：恰好死在 MISSING_CREDENTIAL）
+#   kc-hmos start [--port N]    后台起 Web 引擎（必须 node --expose-internals，见 README 第 6 节）
+#   kc-hmos url                 打印带 token 的地址（首次进浏览器/鸿蒙壳用它换 cookie）
+#   kc-hmos status              进程 / 端口 / 就绪行 / 出网 四项体检
+#   kc-hmos stop                停引擎
+#   kc-hmos doctor              环境自检（工具链、平台事实、补丁是否在位）
+#
+# 环境变量：KINGCODE_REPO（默认 ~/kingcode）、DSH_HOME（默认 /data/storage/el2/base/kingcode-home）、
+#          KC_PORT（默认 3081）、KC_REGISTRY（默认空=官方源；官方源不通时用 https://registry.npmmirror.com）
+#
+# 设计上的两条硬约束，别绕开（真机实测，见 README）：
+# - **必须 node --expose-internals 起 dsh**：cordis-plugin-loader 要拿 Node 内部 ESM 加载器来解析
+#   profile 里的包，它优先用 node-addon-require-builtin，而那个 addon 没有 openharmony 构建。
+#   不加这个旗标，profile 层的包（品牌层等）一律 Cannot find package。
+# - **DSH_HOME 必须落在 /data/storage/el2/base**：家目录是 hmdfs，chmod 600 落成 660，
+#   dsh-credentials-local 会拒绝启动。
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="${KINGCODE_REPO:-$HOME/kingcode}"
+PORT="${KC_PORT:-3081}"
+BREW_PREFIX="$HOME/.harmonybrew"
+GLOBAL_DSH="$BREW_PREFIX/lib/node_modules/@deepseek-ai/dsh"
+STATE="$HOME/.kc-hmos"
+LOG="$STATE/web-$PORT.log"
+REG=""
+[ -n "${KC_REGISTRY:-}" ] && REG="--registry=$KC_REGISTRY"
+mkdir -p "$STATE"
+
+info() { printf '  %s\n' "$*"; }
+die()  { printf 'kc-hmos: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+load_env() { . "$HERE/env.sh"; }
+
+cmd_deps() {
+  have brew || die "先装 Harmonybrew：https://harmonybrew.atomgit.com （需开「开发者选项」与「运行来自非应用市场的扩展程序」）"
+  # ohos-sdk 提供 clang（2.7 GB）；llvm-gcc-compat 把它软链成 gcc/cc/ld/ar 这些 GNU 名字，
+  # node-gyp 的 Makefile 默认 CC=cc，没有它会报 cc: command not found。
+  for p in node cmake make ninja python@3.12 ohos-sdk llvm-gcc-compat git ripgrep bash pnpm; do
+    printf '==> brew install %s\n' "$p"; brew install "$p" || die "装 $p 失败"
+  done
+  cmd_doctor
+}
+
+rebuild_node_pty() {
+  root="$1"
+  [ -d "$root/node_modules/node-pty" ] || { info "（这棵树没有 node-pty，跳过）"; return 0; }
+  have clang || die "没有 clang（brew install ohos-sdk llvm-gcc-compat）"
+  info "现编 node-pty（node-pty 没有 openharmony 预编译，必须本机编）"
+  ( cd "$root" && CC=clang CXX=clang++ npm rebuild node-pty ) || die "node-pty 编译失败"
+  ls "$root/node_modules/node-pty/build/Release/pty.node" >/dev/null 2>&1 \
+    && info "pty.node 已生成" || die "编译跑完但没有 pty.node"
+}
+
+cmd_install_cli() {
+  [ -f "$REPO/package.json" ] || die "找不到 KingCode 仓库：$REPO（用 KINGCODE_REPO 指定）"
+  load_env
+  info "npm ci --ignore-scripts（koffi 的 postinstall 会试图现编、必败，先跳过全部脚本）"
+  ( cd "$REPO" && npm ci --ignore-scripts $REG ) || die "npm ci 失败"
+  rebuild_node_pty "$REPO"
+  sh "$HERE/patch-node-modules.sh" --repo "$REPO" || die "打补丁失败"
+  info "完成。验证： kc-hmos smoke"
+}
+
+cmd_install_web() {
+  load_env
+  have npm || die "没有 npm（brew install node）"
+  info "npm i -g @deepseek-ai/dsh --ignore-scripts"
+  npm i -g @deepseek-ai/dsh --ignore-scripts $REG || die "装全局 dsh 失败"
+  rebuild_node_pty "$GLOBAL_DSH"
+  # sharp：dsh-attachment-local 加载期就 require 它，没有 openharmony 原生二进制，用 WASM 后端。
+  # 注意它连带 @emnapi/runtime；某些镜像上 @img/sharp-wasm32 会 404，那就从另一台机器拷这三个目录。
+  sv="$(node -p "require('$GLOBAL_DSH/node_modules/sharp/package.json').version" 2>/dev/null)"
+  if [ -n "$sv" ]; then
+    info "sharp $sv → 装 WASM 后端"
+    ( cd "$GLOBAL_DSH" && npm install --no-save --ignore-scripts $REG "@img/sharp-wasm32@$sv" ) \
+      || info "！@img/sharp-wasm32 装不上（镜像可能没有）。从另一台机器拷 @img/sharp-wasm32、@emnapi/runtime、tslib 三个目录到 $GLOBAL_DSH/node_modules"
+  fi
+  sh "$HERE/patch-node-modules.sh" --global || die "打补丁失败"
+  if [ -x "$REPO/profile/setup.sh" ]; then
+    info "装 profile 与 preset（品牌层、KingCode 预设）"
+    ( cd "$REPO" && bash profile/setup.sh ) || die "profile/setup.sh 失败"
+  fi
+  info "完成。起服务： kc-hmos start"
+}
+
+cmd_patch() { load_env; sh "$HERE/patch-node-modules.sh" "$@"; }
+cmd_smoke() { sh "$HERE/smoke.sh"; }
+
+engine_pid() { pgrep -f "profile kingcode --port $PORT" 2>/dev/null | head -1; }
+
+cmd_start() {
+  load_env
+  [ -n "$(engine_pid)" ] && { info "已经在跑（pid $(engine_pid)）"; cmd_url; return 0; }
+  have dsh || die "没有 dsh（kc-hmos install-web）"
+  DSHBIN="$(readlink -f "$(command -v dsh)")"
+  info "起引擎：node --expose-internals $DSHBIN --profile kingcode --port $PORT"
+  # nohup + --expose-internals：后者是硬要求，理由见文件头注释。
+  nohup node --expose-internals "$DSHBIN" --profile kingcode --port "$PORT" --no-open > "$LOG" 2>&1 &
+  i=0
+  while [ $i -lt 45 ]; do
+    sleep 2
+    grep -q 'dsh web: http' "$LOG" 2>/dev/null && { info "就绪"; cmd_url; return 0; }
+    i=$((i+1))
+  done
+  info "等了 90s 没看到就绪行，日志尾部："; tail -15 "$LOG"; return 1
+}
+
+ready_line() { grep 'dsh web: http' "$LOG" 2>/dev/null | tail -1; }
+
+cmd_url() {
+  u="$(ready_line | grep -o "http://127.0.0.1:$PORT/?token=[A-Za-z0-9_-]*" | head -1)"
+  [ -n "$u" ] || { info "日志里还没有带 token 的就绪行"; return 1; }
+  printf '  浏览器 / 鸿蒙壳里首次打开这个地址（换一枚 30 天有效的 cookie，之后用干净地址即可）：\n  %s\n' "$u"
+}
+
+cmd_stop() {
+  p="$(engine_pid)"
+  [ -n "$p" ] || { info "没在跑"; return 0; }
+  kill "$p" 2>/dev/null; sleep 2
+  [ -n "$(engine_pid)" ] && kill -9 "$(engine_pid)" 2>/dev/null
+  info "已停（原 pid $p）"
+}
+
+cmd_status() {
+  load_env
+  p="$(engine_pid)"
+  printf '  %-12s %s\n' '进程' "${p:-没在跑}"
+  if have curl; then
+    # 首页无 cookie 必然 401——那是认证生效的正常态，不是死了。只有连不上（000）才是死了。
+    code="$(curl -s -o /dev/null -m 8 -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null)"
+    case "$code" in
+      401) printf '  %-12s %s\n' '端口' "$PORT 活着（401 = 认证生效、还没换 cookie，正常）" ;;
+      200) printf '  %-12s %s\n' '端口' "$PORT 活着（200 = 本进程已有 cookie）" ;;
+      000) printf '  %-12s %s\n' '端口' "$PORT 连不上" ;;
+      *)   printf '  %-12s %s\n' '端口' "$PORT → HTTP $code" ;;
+    esac
+    out="$(curl -s -o /dev/null -m 12 -w '%{http_code}' https://api.deepseek.com/ 2>/dev/null)"
+    if [ "$out" = "000" ]; then
+      printf '  %-12s %s\n' '出网' "api.deepseek.com 不通（模型请求会以 TRANSPORT 失败——先修网络，不是引擎的问题）"
+    else
+      printf '  %-12s %s\n' '出网' "api.deepseek.com → HTTP $out"
+    fi
+  fi
+  printf '  %-12s %s\n' '就绪行' "$(ready_line | sed -E 's/token=[A-Za-z0-9_-]+/token=<省略>/' || echo '无')"
+  printf '  %-12s %s\n' 'DSH_HOME' "$DSH_HOME"
+}
+
+cmd_doctor() {
+  load_env
+  echo '── 工具链 ──'
+  for c in node npm brew clang cc make cmake ninja python3 git rg bash pnpm dsh; do
+    printf '  %-10s %s\n' "$c" "$(command -v $c 2>/dev/null || echo '缺')"
+  done
+  echo '── 平台事实 ──'
+  printf '  %-22s %s\n' 'process.platform' "$(node -p 'process.platform+" "+process.arch' 2>/dev/null)"
+  printf '  %-22s %s\n' 'V8 lite mode（要 0）' "$(node -p 'process.config.variables.v8_enable_lite_mode' 2>/dev/null)"
+  printf '  %-22s %s\n' '内核' "$(uname -sr 2>/dev/null)"
+  t="$DSH_HOME/.kc-mode-probe"; : > "$t" 2>/dev/null && chmod 600 "$t" 2>/dev/null
+  printf '  %-22s %s\n' 'DSH_HOME chmod 600' "$(stat -c '%a' "$t" 2>/dev/null || echo '?') （必须是 600；660 说明落在 hmdfs 上，凭证会被拒）"
+  rm -f "$t"
+  a="$HOME/.kc-link-a"; b="$HOME/.kc-link-b"; : > "$a" 2>/dev/null
+  if ln "$a" "$b" 2>/dev/null; then printf '  %-22s %s\n' '硬链接' '可用（意外——补丁③④可不打）'; else printf '  %-22s %s\n' '硬链接' '禁止（补丁③④必需）'; fi
+  rm -f "$a" "$b"
+  echo '── 补丁是否在位 ──'
+  for root in "$REPO/node_modules" "$GLOBAL_DSH/node_modules"; do
+    [ -d "$root" ] || continue
+    printf '  %s\n' "$root"
+    grep -q 'openharmony' "$root/@deepseek-ai/dsh-subprocess-local/lib/index.js" 2>/dev/null \
+      && printf '    %-16s %s\n' 'openharmony 分支' '已打' || printf '    %-16s %s\n' 'openharmony 分支' '未打'
+    grep -q 'kingcode-openharmony-stub' "$root/koffi/index.js" 2>/dev/null \
+      && printf '    %-16s %s\n' 'koffi 桩' '已打' || printf '    %-16s %s\n' 'koffi 桩' '未打'
+    [ -e "$root/@vscode/ripgrep-openharmony-arm64/bin/rg" ] \
+      && printf '    %-16s %s\n' 'ripgrep 平台包' '在' || printf '    %-16s %s\n' 'ripgrep 平台包' '缺'
+    [ -f "$root/node-pty/build/Release/pty.node" ] \
+      && printf '    %-16s %s\n' 'node-pty' '已编' || printf '    %-16s %s\n' 'node-pty' '未编'
+  done
+}
+
+case "${1:-help}" in
+  deps)         shift; cmd_deps "$@" ;;
+  install-cli)  shift; cmd_install_cli "$@" ;;
+  install-web)  shift; cmd_install_web "$@" ;;
+  patch)        shift; cmd_patch "$@" ;;
+  smoke)        shift; cmd_smoke "$@" ;;
+  start)        shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; *) shift;; esac; done; cmd_start ;;
+  stop)         shift; while [ $# -gt 0 ]; do case "$1" in --port) PORT="$2"; LOG="$STATE/web-$PORT.log"; shift 2;; *) shift;; esac; done; cmd_stop ;;
+  url)          shift; cmd_url ;;
+  status)       shift; cmd_status ;;
+  doctor)       shift; cmd_doctor ;;
+  help|-h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "未知子命令：$1（kc-hmos help）" ;;
+esac
