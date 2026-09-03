@@ -18,30 +18,20 @@ HiShell 里，没有虚拟机、没有容器。
 |---|---|---|
 | **CLI（A 级）** | ✅ 全通 | 整棵组合树 boot 成功；无钥烟测恰好死在 `MISSING_CREDENTIAL`；`npm test` 全绿；带钥 `say hi` 退出码 0；一个真用工具的任务里 **bash 工具经 node-pty 在原生内核上跑 `uname -a`**（回 `HongMeng Kernel 1.13.0`）、**grep 工具经 ripgrep** 数出 README 26 行 |
 | **Web（B 级）** | ✅ 全通 | 全局 dsh 原生 boot；`GET /` 401 → `?token=` 303 换 cookie → 200；`/api` 到网关；鸿蒙 ArkWeb 壳连 `127.0.0.1:3081` 加载出完整工作区（品牌层、侧栏、KingCode 预设、设置→模型页「API 密钥已配置」）；**在壳里发一条真消息拿到回答**——2 次工具调用，bash 经 node-pty 回 `HongMeng Kernel 1.13.0 … aarch64 Toybox`，grep 经 ripgrep 数出 26 行，20K token / 11 秒 / 89 tok/s / 缓存命中 46%（DeepSeek-V4-Pro High，完全权限） |
+| **从零即装即用** | ✅ 全通（2026-09-03） | 全新 clone 的两个仓库 + 全新 `DSH_HOME`，照本文的步骤在真机上走了一遍：`deps` → `install-cli` → `smoke`（PASS，恰好死在 `MISSING_CREDENTIAL`）→ `install-web` → `start` → **在鸿蒙自带浏览器里打开 `kc-hmos url` 那条地址**，token 被 303 换成 cookie、加载出带品牌与 KingCode 预设的完整工作区，发消息拿到带工具调用的真回答——bash 工具经 node-pty 跑出 `HarmonyOS localhost HongMeng Kernel 1.13.0 … aarch64 Toybox`，17.8K token / 3 秒 / 91 tok/s / 缓存命中 67% |
 | 上架应用市场（C 级） | ❌ 未做 | 应用沙箱（normal_hap 域）有 neverallow 限制，是另一条路 |
 
-> **这张表说的是「这台设备上跑通过」，不是「clone 下来就跑得通」。** A/B 级的证据产于
-> 一套手工命令序列，`scripts/kc-hmos` 是事后封装的；从零 `git clone` → 能用这条整链
-> 尚未一次性复跑过。2026-09-03 的一轮审计（六维度 + 对抗性核实）在其中挖出并修掉了
-> 若干真缺陷，最硬的一个是 README 教的 `ln -sf` 装法会让脚本找不到自己的 `env.sh`
-> ——除 `url`/`stop` 外每个子命令都死在第一句（`$0` 是软链、`HERE` 没解引用）。
-> 现在 `kc-hmos` 会 `readlink -f "$0"`，`install-web` 的三处静默跳过全改成硬失败，
-> `patch-node-modules.sh` 的自检也进退出码了。
+> **2026-09-03 的一轮审计（六维度 + 对抗性核实）在这套东西里挖出并修掉了若干真缺陷**，
+> 最硬的一个是 README 教的 `ln -sf` 装法会让脚本找不到自己的 `env.sh`——除 `url`/`stop`
+> 外每个子命令都死在第一句（`$0` 是软链、`HERE` 没解引用）。修完之后按上表从零走了一遍，
+> 全通。这一轮同时改掉的还有：`install-web` 的三处静默跳过改成硬失败、sharp 改用
+> `npm pack` 而不是会挂死的 `npm install --no-save`、`patch-node-modules.sh` 的自检进退出码、
+> `doctor` 补上版本分叉 / profile·preset·sharp / 凭证三类体检。
 >
-> **A 级已经从零跑通一次（09-03 15:21–15:23，真机 HiShell，全程经软链调用）**：全新 clone
-> 的仓库 + 全新 `DSH_HOME`，`deps` rc=0 → `install-cli` rc=0（`npm ci --ignore-scripts` 293 包、
-> node-pty 现编出 `pty.node`、**八处补丁全 PATCHED**、自检全 OK）→ `smoke` **PASS，整棵树
-> boot 成功、恰好死在 `MISSING_CREDENTIAL`**。经软链这条路正是修之前必死的那条。
->
-> **B 级还没跑完**：`install-web` 把全局 dsh 从 alpha.3 装到 alpha.5 用了 8 分钟（走 npmmirror），
-> 然后**卡在 sharp WASM 那一步二十多分钟没有任何进展**（不是失败、是挂住——比失败更难排查，
-> 因为 `die` 等不到）。这一条记进「还没做的」。
->
-> 另外，当天 `github.com` / `registry.npmjs.org` / `nodejs.org` 全部 `http=000`，而
-> `registry.npmmirror.com` 200、`api.deepseek.com` 401、`gitee`/`gitcode`/`atomgit` 200
-> ——**第 0 步的 `git clone` 在这种网络下直接走不了**。这轮是在另一台机器上做 `git clone --depth 1`
-> 再把整个目录（含 `.git`）搬进设备来等价替代的，后面每一步都是设备上原样跑的。
-
+> **仍然要说清的一件事**：当天 `github.com` 是 `http=000`（同时 `registry.npmmirror.com` 200、
+> `api.deepseek.com` 401、`gitee`/`gitcode`/`atomgit` 200），所以第 0 步的 `git clone` 在那种
+> 网络下走不了。上表那次是在另一台机器上做 `git clone --depth 1` 再把整个目录（含 `.git`）
+> 搬进设备来等价替代的，**从 `kc-hmos deps` 开始的每一步都是设备上原样跑的**。
 
 ## 三步装完
 
@@ -234,9 +224,10 @@ export DSH_PERMISSION_MODE=danger-full-access
 入库的工程是 `"signingConfigs": []`，首次 Build 不会失败，只会打一条
 `WARN Will skip sign 'hos_hap'` 然后产出 unsigned hap——照着装就是 9568320。
 
-**没有壳也能用**：`kc-hmos url` 那条地址在系统自带浏览器里同样能开（原生形态是 `127.0.0.1`，
-loopback 属安全上下文，剪贴板与设置面都不降级）。**但这条路我们只在虚拟机路线的模拟器上验过，
-真机 + 127.0.0.1 + alpha.5 的 token→cookie 组合一次都没跑过**，见「还没做的」。
+**没有壳也能用，而且这条路已经在真机上验过了**（2026-09-03）：`kc-hmos url` 打印的那条地址
+直接在鸿蒙自带浏览器里打开，token 被 303 换成 cookie（之后地址栏就是干净的 `127.0.0.1:3082`），
+加载出带品牌层与 KingCode 预设的完整工作区，发消息拿到带工具调用的真回答。原生形态是
+`127.0.0.1`，loopback 属安全上下文，剪贴板与设置面都不降级。**所以装不了壳完全不影响用。**
 
 [KingCode 仓库的 `harmony/`](https://github.com/Promethues0/kingcode/tree/main/harmony) 是那个
 ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
@@ -351,10 +342,12 @@ ArkTS + ArkWeb 壳。原生形态下它连 `127.0.0.1:3081`，
 
 **卡在「即装即用」上的：**
 
-- **B 级（Web）那半条整链还没跑通**：`install-web` 会挂在 sharp WASM 那一步（09-03 实测，
-  20+ 分钟无进展、无报错）。A 级（CLI）已经从零跑通，见上面的验证说明。
-- **`install-web` 的 sharp 那步只防得住「失败」，防不住「挂住」**。现在失败会 `die`，
-  但挂住时用户看到的还是一个不动的终端。toybox 的 `timeout` 又不能用（坑 5），暂无好办法。
+- ~~B 级那半条整链还没跑通~~ —— **已通**（见验证表）。挂住的根因是 `install-web` 用
+  `npm install --no-save` 装 sharp：全局树没有任何 lockfile，那条命令会对 ~70 个 caret
+  依赖做整树重解析，实测挂 20 分钟无进展；而且按 reify 语义它还会重解包整棵树，把刚打的
+  补丁和刚编的 `pty.node` 一起冲掉。改成 `npm pack` + 手工解开（同一台机器上 3 个包 5 秒），
+  既不挂也不碰树里别的东西。
+- ~~浏览器那条路没在真机验过~~ —— **已验**（见验证表）。
 - **浏览器那条路没在真机上验过**。壳对大多数人装不上（第 6 节），所以「Web 工作区里发一条
   消息拿到回答」实际上压在系统自带浏览器上——而它能不能打 `127.0.0.1`、地址栏吃不吃带
   `?token=` 的长地址、cookie 会不会有落盘窗口，一条记录都没有。

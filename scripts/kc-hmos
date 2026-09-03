@@ -72,6 +72,35 @@ rebuild_node_pty() {
     && info "pty.node 已生成" || die "编译跑完但没有 pty.node"
 }
 
+# 把若干个包按 tarball 解进一棵树，**绕开 npm 的整树 reify**。
+# 为什么必须这样：全局 dsh 那棵树没有任何 lockfile（package-lock.json 与
+# node_modules/.package-lock.json 都没有，实测），`npm install --no-save <pkg>` 会对它
+# ~70 个 caret 依赖做一次全量重解析——2026-09-03 在真机上实测挂住 20 分钟没有任何进展，
+# 而且按 npm reify 的语义它还会重解包整棵树，把刚打的补丁和刚编的 pty.node 一起冲掉。
+# npm pack 只下 tarball（同一台机器上实测 3 个包 5 秒），解开就完事，不碰树里别的东西。
+fetch_into() {
+  root="$1"; shift
+  tmp="$root/.kc-pack"
+  rm -rf "$tmp"; mkdir -p "$tmp" || return 1
+  ( cd "$tmp" && npm pack $REG "$@" >/dev/null 2>&1 ) || { rm -rf "$tmp"; return 1; }
+  ok=0
+  for tgz in "$tmp"/*.tgz; do
+    [ -f "$tgz" ] || continue
+    d="$tmp/x"; rm -rf "$d"; mkdir -p "$d"
+    tar -xzf "$tgz" -C "$d" || { rm -rf "$tmp"; return 1; }
+    name="$(node -p "require('$d/package/package.json').name" 2>/dev/null)"
+    ver="$(node -p "require('$d/package/package.json').version" 2>/dev/null)"
+    [ -n "$name" ] || { rm -rf "$tmp"; return 1; }
+    dest="$root/$name"
+    rm -rf "$dest"; mkdir -p "$(dirname "$dest")" || { rm -rf "$tmp"; return 1; }
+    mv "$d/package" "$dest" || { rm -rf "$tmp"; return 1; }
+    info "  解开 $name@$ver"
+    ok=$((ok+1))
+  done
+  rm -rf "$tmp"
+  [ "$ok" -gt 0 ]
+}
+
 cmd_install_cli() {
   [ -f "$REPO/package.json" ] || die "找不到 KingCode 仓库：$REPO（用 KINGCODE_REPO 指定）"
   load_env
@@ -97,22 +126,22 @@ cmd_install_web() {
   # 不钉就会装到一棵没有会话认证的树——本 README 第 5 节整节都不成立，而且补丁锚点也对不上。
   info "npm i -g @deepseek-ai/dsh@$KC_DSH_VERSION --ignore-scripts"
   npm i -g "@deepseek-ai/dsh@$KC_DSH_VERSION" --ignore-scripts $REG || die "装全局 dsh 失败"
+  rebuild_node_pty "$GLOBAL_DSH"
   # sharp：dsh-attachment-local 加载期就 require 它，没有 openharmony 原生二进制，用 WASM 后端。
-  # 注意它连带 @emnapi/runtime。**这一步失败必须 die**：缺了 Web 引擎 boot 不起来，
-  # 而以前只打一行提示就继续，用户看到「完成」、然后 start 空等 90 秒才发现。
+  # 连带 @emnapi/runtime 与 tslib。走 fetch_into（npm pack + 解开），**不要用
+  # `npm install --no-save`**——理由见 fetch_into 的注释，那条路在这棵没有 lockfile 的树上
+  # 会挂死，而且会把上一行刚编好的 pty.node 冲掉。这一步失败必须 die：缺了 sharp
+  # Web 引擎 boot 不起来，而以前只打一行提示就继续，用户看到「完成」、然后 start 空等 90 秒。
   sv="$(node -p "require('$GLOBAL_DSH/node_modules/sharp/package.json').version" 2>/dev/null || true)"
   [ -n "$sv" ] || die "全局树里没有 sharp（$GLOBAL_DSH/node_modules/sharp）——上一步的 dsh 没装全？"
-  info "sharp $sv → 装 WASM 后端"
-  ( cd "$GLOBAL_DSH" && npm install --no-save --ignore-scripts $REG "@img/sharp-wasm32@$sv" ) || die \
-"装 @img/sharp-wasm32@$sv 失败。这个包在官方源上是有的（0.35.4 实探 200），失败基本是源/出网问题：
+  info "sharp $sv → 装 WASM 后端（npm pack + 解开，不做整树 reify）"
+  fetch_into "$GLOBAL_DSH/node_modules" "@img/sharp-wasm32@$sv" "@emnapi/runtime" "tslib" || die \
+"取 @img/sharp-wasm32@$sv 失败。这个包在 registry.npmmirror.com 上是有的（实测 200），
+   失败基本是源/出网问题：
     ① npm config set registry https://registry.npmmirror.com   （npm 与 pnpm 都读 ~/.npmrc）
     ② 或 KC_REGISTRY=… kc-hmos install-web
     ③ 断网兜底：从另一台机器把 @img/sharp-wasm32、@emnapi/runtime、tslib 三个目录拷到
        $GLOBAL_DSH/node_modules（tar 时路径写 ./@img/... ）"
-  # **node-pty 现编必须排在所有 npm 操作之后**：全局树没有 lockfile（连 .package-lock.json
-  # 都没有），上面那次 npm install 是整棵树重解析重解包，会把 pty.node 一起冲掉，
-  # 而补丁能在下一步补回来、pty.node 没有任何东西补。
-  rebuild_node_pty "$GLOBAL_DSH"
   sh "$HERE/patch-node-modules.sh" --global || die "打补丁失败"
   info "装 profile 与 preset（品牌层、KingCode 预设）"
   ( cd "$REPO" && bash profile/setup.sh ) || die "profile/setup.sh 失败"
