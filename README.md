@@ -6,7 +6,11 @@ HiShell 里，没有虚拟机、没有容器。
 
 > 设备：HUAWEI MateBook 14 / HarmonyOS 7.0.0.102 / API 26 / HongMeng Kernel 1.13.0 / aarch64
 > Node 26.8.1（`process.platform === 'openharmony'`，V8 非 lite、JIT 正常）
-> dsh `0.1.2-alpha.3`（上游 alpha 通道）
+> dsh `0.1.2-alpha.5`（上游 alpha 通道；`kc-hmos install-web` 装的就是这一版）
+>
+> 注意一处分叉：下面「验证到哪一步了」表里 B 级那次真机记录跑的是**全局 alpha.3**，
+> 主仓库随后才升到 alpha.5。五处补丁的锚点在 alpha.5 上逐字命中且唯一（已核），
+> 但 B 级链路本身尚未在 alpha.5 上复跑。
 
 ## 验证到哪一步了
 
@@ -20,7 +24,7 @@ HiShell 里，没有虚拟机、没有容器。
 
 ```sh
 git clone https://github.com/Promethues0/kingcode-deepseekharness-harmonyos.git ~/kc-hmos
-git clone https://github.com/Promethues0/kingcode.git ~/kingcode
+git clone https://github.com/Promethues0/kingcode.git ~/kingcode   # 想复现本文记录的状态就 checkout 到对应提交
 ln -sf ~/kc-hmos/scripts/kc-hmos ~/.harmonybrew/bin/kc-hmos
 
 kc-hmos deps          # Harmonybrew 依赖（ohos-sdk 2.7 GB，慢）
@@ -160,8 +164,10 @@ ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态
 **引擎重启之后不用重贴地址**：cookie 的 signing secret 落盘在 `$DSH_HOME/.credentials.yaml`，
 壳里保存的旧地址照样能进，只是 WebSocket 断了——点一次左下角「连接异常，点击立即重连」即可。
 
-壳目前还没接 401 判读（`onErrorReceive` 只认网络错误，HTTP 错误要 `onHttpErrorReceive`），
-所以 cookie 真过期（30 天）或换了端口时是白页，得手动改地址。
+壳已接 `onHttpErrorReceive`（`onErrorReceive` 只认网络错误，HTTP 401/403 不触发它）：cookie 过期或
+换了端口时会回到地址页并提示「用带 token 的地址换一次 cookie」，而不是白页。另外它在 `onPageEnd`
+调 `WebCookieManager.saveCookieSync()` 强制落盘——ArkWeb 的 cookie 每 30 秒才周期性写盘，
+换到 cookie 后 30 秒内被杀就丢了。（主仓库 commit 22d6820）
 
 ---
 
@@ -208,7 +214,7 @@ ArkTS + ArkWeb 壳（DevEco 打开、自动签名、真机 Run）。原生形态
 | 项 | [shd101wyy/deepseek-harness-harmonyos](https://github.com/shd101wyy/deepseek-harness-harmonyos) | [u010189254/dsh-harmonyos-deploy](https://gitcode.com/u010189254/dsh-harmonyos-deploy) | 本项目 |
 |---|---|---|---|
 | 对象 | 上游 dsh 原版 Web UI | 上游 dsh | **KingCode**（自有组合树、品牌层、preset、eval），CLI + Web + ArkWeb 壳 |
-| dsh 版本 | 0.1.0-rc.6 | 0.1.0-rc.6 | **0.1.2-alpha.3** |
+| dsh 版本 | 0.1.0-rc.6（据其 README 第 12 节的对照式表述，非独立核对） | 0.1.0-rc.6（转引自 shd101wyy README 第 12 节，未一手核对） | **0.1.2-alpha.5** |
 | 设备 | MateBook Pro / Kernel 1.12.0 | 鸿蒙 PC 7.0 / API 26 / Kernel 1.13.0 | MateBook 14 / 7.0.0.102 / API 26 / Kernel 1.13.0 |
 | koffi | **源码构建**（cmake toolchain 文件 + 关掉 POST_BUILD strip） | patch `dsh-sandbox-local`，把 windows-acl 的顶层 import 改成 win32 惰性 | **惰性桩**（带结构体大小表，同时治 subprocess-local 与 win32-process） |
 | ripgrep | patch `@vscode/ripgrep/lib/index.js` 回退到 brew 的 rg | 手工放 `~/.local/bin/rg` | 造本地平台包 `@vscode/ripgrep-openharmony-arm64` |
@@ -231,7 +237,6 @@ alpha 通道的会话认证、以及 el2 换 home 这条免补丁的路。
 - 从零 `npm ci --ignore-scripts` 的完整顺序没复跑过——现在设备上这棵树是逐步摸出来的。
 - ~~关掉 HiShell 窗口后引擎是否存活~~ —— **已验，答案是不存活**（见「引擎的生命周期」一节）。
 - 开机自启：能做的只有「开机自动打开 HiShell 并拉起引擎」，窗口仍必须留着。
-- 壳里接 `onHttpErrorReceive` 判 401/403。
 - 向上游提三件事（只开 Discussions）：把 `openharmony` 当 POSIX 认、`link()` EPERM 回落 rename、
   koffi 改惰性加载——合入后 ①②③④ 都不再需要。
 

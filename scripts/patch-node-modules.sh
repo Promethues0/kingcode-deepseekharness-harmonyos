@@ -1,6 +1,10 @@
 #!/bin/sh
 # KingCode / DeepSeek Harness 原生跑在鸿蒙 PC（HiShell，不经虚拟机）：给一棵 node_modules 打 openharmony 补丁。
 #
+# **本文件是主仓库 kingcode 的 deploy/harmonyos-native/patch-node-modules.sh 的独立套件版**，
+# 两份手工同步：`KC_ROOT=` 以下（五处补丁、koffi 桩、ripgrep 平台包、自检）逐字节相同，
+# 以上的差异是本版特有的参数解析（--repo / --global / 默认 ROOT 推导）。改补丁体请两边一起改。
+#
 #   sh scripts/patch-node-modules.sh                    # KingCode 仓库的 node_modules（CLI 形态，A 级）
 #   sh scripts/patch-node-modules.sh --global           # 全局 dsh 那棵树（Web 形态，B 级）
 #   sh scripts/patch-node-modules.sh --root <dir>       # 任意一棵 node_modules
